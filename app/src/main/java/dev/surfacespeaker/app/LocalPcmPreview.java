@@ -43,9 +43,9 @@ final class LocalPcmPreview {
                 oldX=v;
                 low+=LP*(high-low);
                 // PCM output stays within about +/-24/127 prior to driver magnitude scaling.
-                float shaped=(float)Math.tanh(low*3.4)*64;
+                float shaped=(float)Math.tanh(low*4.1)*76;
                 float fade=Math.min(1f, Math.min((count+1)/1800f,(MAX_SAMPLES-count)/1800f));
-                pcm[count++]=(byte)Math.round(Math.max(-64,Math.min(64,shaped*fade)));
+                pcm[count++]=(byte)Math.round(Math.max(-76,Math.min(76,shaped*fade)));
                 nextPosition+=(double)inputRate/SAMPLE_RATE;
             }
             last=x;

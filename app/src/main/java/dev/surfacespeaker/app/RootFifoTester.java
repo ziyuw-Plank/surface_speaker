@@ -31,19 +31,19 @@ final class RootFifoTester {
     }
     static String run(Context context,boolean test,int frequency,int percent){
         if(!deviceCandidate())return "DISABLED: only Xiaomi shennong arm64 is enabled";
-        if(test&&(frequency<100||frequency>300||percent<1||percent>40))return "DISABLED: parameter bounds";
+        if(test&&(frequency<100||frequency>300||percent<1||percent>48))return "DISABLED: parameter bounds";
         String args=test?("test "+frequency+" "+percent):"probe";
         return execute(context,args,null);
     }
     static String longTone(Context context,int frequency,int strength){
         if(!deviceCandidate())return "DISABLED: Xiaomi shennong arm64 only";
-        if(frequency<100||frequency>300||strength<1||strength>40)return "DISABLED: tone limits";
+        if(frequency<100||frequency>300||strength<1||strength>48)return "DISABLED: tone limits";
         return execute(context,"long-tone "+frequency+" "+strength,null);
     }
     static String localPreview(Context context,Uri uri,int strength){
         if(!deviceCandidate())return "DISABLED: Xiaomi shennong arm64 only";
         if(uri==null)return "ERROR: select an audio file first";
-        if(strength<1||strength>40)return "ERROR: media volume muted or invalid output limit";
+        if(strength<1||strength>48)return "ERROR: media volume muted or invalid output limit";
         if(!busy.compareAndSet(false,true))return "ERROR: native test already running";
         LocalPcmPreview.Clip clip=null;
         try {
@@ -57,18 +57,30 @@ final class RootFifoTester {
         try{return runPrivileged(context,args,0,pcm);}
         finally{busy.set(false);}
     }
-    /** Root helper stays alive and accepts 500 ms buffered PCM frames over stdin.
-     * Not gapless: FF_CUSTOM cannot append samples to an already-uploaded effect. */
+    /** 60 ms live frames, single-slot newest-frame queue, native completion acknowledgement.
+     * A full queue drops outdated PCM rather than allowing hidden pipe buffering to drift.
+     * FF_CUSTOM is still discrete; low latency != gapless or phase synchronized. */
     static final class LiveSession implements AutoCloseable {
+        static final int LIVE_SAMPLES=1440; // 60 ms at 24 kHz
+        static final int STALE_MS=120;
+        private static final class Frame {
+            final byte[] pcm;final int strength;final long received;
+            Frame(byte[] pcm,int strength){this.pcm=pcm;this.strength=strength;received=android.os.SystemClock.uptimeMillis();}
+        }
         private final Process process;
         private final OutputStream out;
         private final java.util.concurrent.atomic.AtomicBoolean closed=new java.util.concurrent.atomic.AtomicBoolean(false);
+        private final java.util.concurrent.ArrayBlockingQueue<Frame> queue=new java.util.concurrent.ArrayBlockingQueue<>(1);
+        private final Object ackLock=new Object();
         private final File temp;
         private final File marker;
         private volatile String recentLog="";
         private final CountDownLatch ready=new CountDownLatch(1);
         private volatile boolean readyOk;
-        private int frames;
+        private volatile int frames,dropped;
+        private volatile String writerError="";
+        private int acknowledged;
+        private final Thread writer;
         LiveSession(Process p,File f,File m){
             process=p;out=p.getOutputStream();temp=f;marker=m;
             new Thread(()->{
@@ -77,28 +89,55 @@ final class RootFifoTester {
                     while((line=reader.readLine())!=null){
                         recentLog=line;
                         if(line.startsWith("READY:")){readyOk=true;ready.countDown();}
+                        if(line.startsWith("NEXT:")){synchronized(ackLock){acknowledged++;ackLock.notifyAll();}}
                         if(line.startsWith("ERROR:")){ready.countDown();}
                     }
                 }catch(Exception e){recentLog="Root output: "+e.getMessage();}
-                finally{ready.countDown();}
+                finally{ready.countDown();synchronized(ackLock){ackLock.notifyAll();}}
             },"fifo-root-log").start();
+            writer=new Thread(this::writeLoop,"fifo-low-latency-writer");
+            writer.start();
         }
         boolean awaitReady()throws InterruptedException {return ready.await(3,TimeUnit.SECONDS)&&readyOk&&process.isAlive();}
-        void writeFrame(byte[] audio,int strength)throws Exception {
-            if(closed.get()||!process.isAlive())throw new IllegalStateException("Native FIFO exited: "+recentLog);
-            if(audio.length!=12000)throw new IllegalArgumentException("Expected 500 ms / 12k samples");
-            out.write(Math.max(0,Math.min(40,strength)));
-            out.write(audio);
-            out.flush();frames++;
+        void writeFrame(byte[] audio,int strength){
+            if(closed.get()||!process.isAlive()||!writerError.isEmpty())
+                throw new IllegalStateException("Native FIFO exited: "+recentLog+" "+writerError);
+            if(audio.length!=LIVE_SAMPLES)throw new IllegalArgumentException("Expected 60ms PCM frame");
+            Frame frame=new Frame(audio,Math.max(0,Math.min(48,strength)));
+            if(!queue.offer(frame)){queue.poll();dropped++;if(!queue.offer(frame))dropped++;}
+        }
+        private void writeLoop(){
+            try{
+                int sent=0;
+                while(!closed.get()&&process.isAlive()){
+                    Frame frame=queue.poll(120,TimeUnit.MILLISECONDS);
+                    if(frame==null)continue;
+                    if(android.os.SystemClock.uptimeMillis()-frame.received>STALE_MS){dropped++;continue;}
+                    out.write(frame.strength);out.write(frame.pcm);out.flush();sent++;
+                    long until=android.os.SystemClock.uptimeMillis()+1200;
+                    synchronized(ackLock){
+                        while(!closed.get()&&process.isAlive()&&acknowledged<sent){
+                            long remaining=until-android.os.SystemClock.uptimeMillis();
+                            if(remaining<=0)throw new java.io.IOException("Native FIFO segment ACK timeout; "+recentLog);
+                            ackLock.wait(remaining);
+                        }
+                    }
+                    frames=sent;
+                }
+            }catch(InterruptedException e){Thread.currentThread().interrupt();}
+            catch(Exception e){writerError=e.getClass().getSimpleName()+": "+e.getMessage();recentLog=writerError;}
         }
         int frames(){return frames;}
-        String recentLog(){return recentLog;}
-        boolean alive(){return !closed.get()&&process.isAlive();}
+        int dropped(){return dropped;}
+        String recentLog(){return writerError.isEmpty()?recentLog:writerError;}
+        boolean alive(){return !closed.get()&&process.isAlive()&&writerError.isEmpty()&&writer.isAlive();}
         @Override public void close(){
             if(!closed.compareAndSet(false,true))return;
+            queue.clear();writer.interrupt();
             try{marker.createNewFile();}catch(Exception ignored){}
+            synchronized(ackLock){ackLock.notifyAll();}
             try{out.close();}catch(Exception ignored){}
-            try{if(!process.waitFor(2,TimeUnit.SECONDS)){process.destroy();if(!process.waitFor(1,TimeUnit.SECONDS))process.destroyForcibly();}}
+            try{if(!process.waitFor(1,TimeUnit.SECONDS)){process.destroy();if(!process.waitFor(1,TimeUnit.SECONDS))process.destroyForcibly();}}
             catch(InterruptedException ignored){process.destroyForcibly();Thread.currentThread().interrupt();}
             marker.delete();temp.delete();busy.set(false);
         }

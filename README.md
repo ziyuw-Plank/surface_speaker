@@ -1,13 +1,9 @@
-# SurfaceSpeaker v0.9 — Native FIFO live capture experiment
+# SurfaceSpeaker v0.10 — Low-latency FIFO experiment (Xiaomi 14 Pro)
 
-Native ARM64 root haptic FIFO engine for Xiaomi 14 Pro / shennong (Android 16).
-
-- Default route is Native FIFO on shennong, for local and live playback capture. The route selector in Music also controls live output. Android system MediaProjection consent remains required to capture other apps (audio only; no screen image captured).
-- Live capture retains a rooted helper process and writes signed 8-bit, 24-kHz, band-limited PCM over its stdin. The helper submits **individual 500-ms** FF_CUSTOM effects. This is **buffered real-time**, *not gapless continuous PCM*; transitions may click/stutter and latency may be noticeable. It does not silently revert to Android Haptics if root fails.
-- A single Root helper process (rather than spawning per block) reduces control overhead. In-app diagnostics show native block count and native errors.
-- Strength: maximum FF magnitude raised cautiously from 25 to 40%; audio sample cap raised from ±48 to ±64 (signed 8-bit). Output is still media-volume-linked and the user's motor-ratio setting is preserved. These are driver request limits, not calibrated mechanical output. Start with low ratios and increase gradually.
-- Realtime native mode is automatically bounded to 60 s maximum per capture session, with 1 s cooldown every 15 s; silence at zero media volume does not excite the motor. For prolonged listening, switch to Android compatibility or wait for a vendor-documented streaming ABI.
-- Root and EVIOCSFF may fail on individual HyperOS releases; the capture page reports exact errors. No system-partition writes, SELinux policy modification, or experimental ioctl to /dev/qcom_haptic.
-- The native FIFO device driver copies whole waveforms per upload, so this is **not a fully continuous streaming interface**. Research of vendor RichTap mmap/RTP interface would be required to eliminate seams. An arbitrary kernel may handle FF_CUSTOM differently; protocol is device-limited and the physical outcome is not verified in CI.
-
-Build via GitHub Actions `Build SurfaceSpeaker APK`, download `SurfaceSpeaker-v0.9-debug-apk`.
+- Native 24-kHz FF_CUSTOM frames reduced from 500 ms to **60 ms**. This cuts the buffering floor; it **cannot guarantee imperceptible latency or gapless playback**. Android AudioPlaybackCapture and the hardware path add further delays.
+- Persistent Root process, one-slot latest-frame handoff, native per-frame ACK, and **drop old frames** rather than buffering seconds behind the source. No multi-second pipe buildup. If the driver gets slow, playback may skip frames instead of drifting.
+- PCM sample peak cap raised from ±64 to **±76** and magnitude ceiling from 40% to **48%**. Requests are bounded, not calibrated hardware power; begin with a low Tune ratio and check for heat. Root helper has stop marker and a time limit with cooling pauses.
+- Fixed Android 16 status bar / display-cutout overlap and bottom navigation gesture inset using `WindowInsets`. Fixed bottom dock retained.
+- Default shennong live output remains FIFO. Start Capture still uses MediaProjection audio-only consent to access playback from other apps; Root does **not** expose another app's future decoded PCM via a generic cache interface.
+- An FF_CUSTOM upload contains an entire segment. This design does not write to an appendable PCM FIFO and does not promise perfect phase sync to the system speaker.
+- Hardware API and real acoustics must be validated on the actual phone; CI only verifies binary builds. Do not use with abnormal motor heat/noise. No system partition changes or SELinux relaxation.

@@ -64,18 +64,19 @@ static int open_verified(char *path,size_t cap) {
 /* One upload drives one long FIFO effect; the kernel refills its 2048-byte FIFO via IRQ.
  * Never repeatedly submit short FF events to simulate audio. */
 static int play_fifo(int fd, const char *path, uint8_t *data, int samples, int strength){
-    if(samples<1200 || samples>96000 || strength<1 || strength>40){
+    if(samples<1200 || samples>96000 || strength<1 || strength>48){
         fprintf(stderr,"ERROR: unsupported FIFO samples=%d strength=%d\n",samples,strength);
         return 2;
     }
     // Cap ALL sample bytes, including a file supplied by a privileged caller.
     for(int i=0;i<samples;i++){
         int v=(int)(int8_t)data[i];
-        if(v>64)v=64;
-        if(v< -64)v=-64;
-        int fade=i<360?i:(samples-1-i<360?samples-1-i:360);
+        if(v>76)v=76;
+        if(v< -76)v=-76;
+        int ramp=live_mode?48:360;
+        int fade=i<ramp?i:(samples-1-i<ramp?samples-1-i:ramp);
         if(fade<0)fade=0;
-        v=v*fade/360;
+        v=v*fade/ramp;
         data[i]=(uint8_t)(int8_t)v;
     }
     struct qcom_fifo_payload payload={.idx=0,.length=(uint32_t)samples,.play_rate_hz=24000,.data=data};
@@ -86,23 +87,27 @@ static int play_fifo(int fd, const char *path, uint8_t *data, int samples, int s
     effect.u.periodic.magnitude=(uint16_t)((32767L*strength)/100L);
     effect.u.periodic.custom_len=sizeof(payload);
     effect.u.periodic.custom_data=(int16_t*)&payload;
-    fprintf(stderr,"STATUS: upload FF_CUSTOM samples=%d rate=24000 magnitude=%d percent\n",samples,strength);
+    if(!live_mode)fprintf(stderr,"STATUS: upload FF_CUSTOM samples=%d rate=24000 magnitude=%d percent\n",samples,strength);
     if(ioctl(fd,EVIOCSFF,&effect)<0){fprintf(stderr,"ERROR:EVIOCSFF: %s\n",strerror(errno));return 4;}
-    fprintf(stderr,"STATUS: effect uploaded id=%d\n",effect.id);
+    if(!live_mode)fprintf(stderr,"STATUS: effect uploaded id=%d\n",effect.id);
     struct input_event ev;memset(&ev,0,sizeof(ev));ev.type=EV_FF;ev.code=effect.id;ev.value=1;
     if(write(fd,&ev,sizeof(ev))!=(ssize_t)sizeof(ev)){
         fprintf(stderr,"ERROR:start write: %s\n",strerror(errno));ioctl(fd,EVIOCRMFF,effect.id);return 5;
     }
-    fprintf(stderr,"STATUS: EV_FF start accepted. Actual motor displacement is unverified.\n");
+    if(!live_mode)fprintf(stderr,"STATUS: EV_FF start accepted. Actual motor displacement is unverified.\n");
     int total=samples/24+(live_mode?0:60);
-    for(int elapsed=0;elapsed<total && !aborted;elapsed+=(live_mode?10:25)){
-        if(stop_marker && access(stop_marker,F_OK)==0){aborted=1;break;}
-        sleep_ms(live_mode?10:25);
+    struct timespec started;clock_gettime(CLOCK_MONOTONIC,&started);
+    for(;;){
+        if(aborted || (stop_marker && access(stop_marker,F_OK)==0)){aborted=1;break;}
+        struct timespec now;clock_gettime(CLOCK_MONOTONIC,&now);
+        long elapsed=(now.tv_sec-started.tv_sec)*1000L+(now.tv_nsec-started.tv_nsec)/1000000L;
+        if(elapsed>=total)break;
+        sleep_ms((int)fmin(live_mode?2:15,total-elapsed));
     }
     ev.value=0;(void)write(fd,&ev,sizeof(ev));
     if(!live_mode)sleep_ms(25);
     (void)ioctl(fd,EVIOCRMFF,effect.id);
-    printf("OK:%s single FIFO upload %d samples (%.2fs), 24kHz, magnitude %d%%; kernel accepted FF_CUSTOM; actual motor vibration NOT verified\n",
+    if(!live_mode)printf("OK:%s single FIFO upload %d samples (%.2fs), 24kHz, magnitude %d%%; kernel accepted FF_CUSTOM; actual motor vibration NOT verified\n",
         path,samples,samples/24000.0,strength);
     return aborted?130:0;
 }
@@ -112,26 +117,27 @@ int main(int argc,char **argv){
     char path[64];int fd=open_verified(path,sizeof(path));if(fd<0)return 3;
     if(!strcmp(argv[1],"live-stdin")){
         /* EXPERIMENTAL: raw stdin transport, NOT an appendable kernel FIFO. Each
-         * half-second FF_CUSTOM segment is a separate effect, with possible gaps. */
+         * 60ms FF_CUSTOM segment is a separate effect, with possible gaps. */
         if(argc!=3){fprintf(stderr,"ERROR:live-stdin requires stop marker path\n");close(fd);return 2;}
         stop_marker=argv[2];
-        uint8_t *pcm=malloc(12000);if(!pcm){close(fd);return 3;}
+        const int NSAMPLES=1440; // 60 ms (24 kHz)
+        uint8_t *pcm=malloc(NSAMPLES);if(!pcm){close(fd);return 3;}
         live_mode=1;
         setvbuf(stdout,NULL,_IOLBF,0);
-        printf("READY: live FIFO experimental, 500ms blocks, potential seams\n");
+        printf("READY: low latency live FIFO, 60ms discrete FF_CUSTOM segments; not gapless\n");
         int chunks=0, failures=0;
-        while(!aborted && chunks<120 && access(stop_marker,F_OK)!=0) { // 60s max
+        while(!aborted && chunks<1000 && access(stop_marker,F_OK)!=0) { // up to 60s of submitted audio
             uint8_t strength=0;
             if(fread(&strength,1,1,stdin)!=1)break;
-            size_t n=fread(pcm,1,12000,stdin);
-            if(n!=12000){fprintf(stderr,"ERROR:short incoming audio block %zu\n",n);failures++;break;}
-            if(strength>40){fprintf(stderr,"ERROR:strength exceeds native safety ceiling\n");failures++;break;}
-            if(strength==0){sleep_ms(500);}
-            else {int rc=play_fifo(fd,"live",pcm,12000,strength);if(rc){failures++;break;}}
+            size_t n=fread(pcm,1,NSAMPLES,stdin);
+            if(n!=(size_t)NSAMPLES){fprintf(stderr,"ERROR:short incoming audio block %zu\n",n);failures++;break;}
+            if(strength>48){fprintf(stderr,"ERROR:strength exceeds native safety ceiling\n");failures++;break;}
+            if(strength==0){sleep_ms(60);}
+            else {int rc=play_fifo(fd,"live",pcm,NSAMPLES,strength);if(rc){failures++;break;}}
             chunks++;
-            if(chunks%8==0){fprintf(stderr,"STATUS:live buffered chunks=%d (%.1f s)\n",chunks,chunks*0.5);}
-            /* Periodic cooling at fixed conservative intensity envelope. */
-            if(chunks%30==0 && chunks<120){fprintf(stderr,"STATUS:cooldown 1s after 15s playback\n");sleep_ms(1000);}
+            printf("NEXT:%d\n",chunks); // ACK: Java never queues more than one future frame
+            if(chunks%50==0){fprintf(stderr,"STATUS: live blocks=%d, 60ms each; hardware is segmented\n",chunks);}
+            if(chunks%250==0 && chunks<1000){fprintf(stderr,"STATUS: cooling pause 1s after 15s playback\n");sleep_ms(1000);}
         }
         fprintf(stderr,"DONE:live blocks=%d errors=%d\n",chunks,failures);
         free(pcm);close(fd);return failures?9:0;
@@ -143,7 +149,7 @@ int main(int argc,char **argv){
     if(argc!=4 && argc!=5){fprintf(stderr,"ERROR:expected 2 parameters and optional stop marker\n");close(fd);return 2;}
     if(argc==5)stop_marker=argv[4];
     char *end=NULL;long strength=strtol(argv[3],&end,10);
-    if(*end || strength<1 || strength>40){fprintf(stderr,"ERROR:strength must be 1..40%%\n");close(fd);return 2;}
+    if(*end || strength<1 || strength>48){fprintf(stderr,"ERROR:strength must be 1..48%%\n");close(fd);return 2;}
     uint8_t *samples=NULL;int n=0;
     if(tone){
         end=NULL;long hz=strtol(argv[2],&end,10);
@@ -151,7 +157,7 @@ int main(int argc,char **argv){
         n=!strcmp(argv[1],"test")?1200:48000;
         samples=calloc(n,1);if(!samples){close(fd);return 3;}
         for(int i=0;i<n;i++){
-            int v=(int)lrint(64.0*sin(2*M_PI*(double)hz*i/24000.0));
+            int v=(int)lrint(76.0*sin(2*M_PI*(double)hz*i/24000.0));
             samples[i]=(uint8_t)(int8_t)v;
         }
     }else{

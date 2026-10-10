@@ -33,6 +33,7 @@ public final class PlaybackCaptureService extends Service {
     static volatile boolean preferNativeFifo;
     static volatile String routeMessage="Idle";
     static volatile int nativeBlocks;
+    static volatile int nativeDropped;
     static void setNativeRoute(boolean requested){preferNativeFifo=requested;}
 
     private static volatile HapticEngine.Tune settings=HapticEngine.preset(0);
@@ -80,7 +81,7 @@ public final class PlaybackCaptureService extends Service {
                 .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
                 .addMatchingUsage(AudioAttributes.USAGE_GAME)
                 .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN).build();
-            int sampleRate=22050;
+            int sampleRate=48000;
             int minBuffer=AudioRecord.getMinBufferSize(sampleRate,AudioFormat.CHANNEL_IN_MONO,AudioFormat.ENCODING_PCM_16BIT);
             if(minBuffer<=0)throw new IllegalStateException("No audio input buffer");
             recorder=new AudioRecord.Builder()
@@ -97,15 +98,15 @@ public final class PlaybackCaptureService extends Service {
         return START_NOT_STICKY;
     }
     private void captureLoop(int sampleRate){
-        AudioAnalysis fft=new AudioAnalysis();short[] pcm=new short[AudioAnalysis.N];long lastUi=0;
+        AudioAnalysis fft=new AudioAnalysis();short[] pcm=new short[512];long lastUi=0;
         final boolean nativeMode=preferNativeFifo && RootFifoTester.deviceCandidate();
         final LivePcmConverter converter=nativeMode?new LivePcmConverter():null;
-        nativeBlocks=0;
+        nativeBlocks=0;nativeDropped=0;
         if(nativeMode){
             try{
                 liveSession=RootFifoTester.openLive(this);
                 motor.setEnabled(false);
-                routeMessage="Native FIFO: buffering 500ms blocks; possible seams";
+                routeMessage="Native FIFO low-latency 60ms frames; FF_CUSTOM may still have seams";
                 state(routeMessage,true);
             }catch(Exception e){
                 routeMessage="Native FIFO unavailable: "+e.getMessage();
@@ -118,7 +119,7 @@ public final class PlaybackCaptureService extends Service {
             int count;
             try {count=recorder.read(pcm,0,pcm.length,AudioRecord.READ_BLOCKING);}catch(Exception e){state("Audio read error: "+e.getMessage(),false);break;}
             if(count<0){state("Audio read returned error "+count,false);break;}
-            if(count<256)continue;
+            if(count<128)continue;
             AudioAnalysis.Frame frame=fft.analyze(pcm,count,sampleRate);
             if(frame.rms<0.006f)silent++;else silent=0;
             if(nativeMode){
@@ -129,11 +130,12 @@ public final class PlaybackCaptureService extends Service {
                         HapticEngine.Tune nowTune=settings;
                         float level=motor.effectiveOutputScale(nowTune);
                         // Square-root law keeps dynamics audible at normal system volume.
-                        int strength=level<=0f?0:Math.max(1,Math.min(40,Math.round(40f*(float)Math.sqrt(level))));
+                        int strength=level<=0f?0:Math.max(1,Math.min(48,Math.round(48f*(float)Math.sqrt(level))));
                         int peak=0;for(byte sample:frameData)peak=Math.max(peak,Math.abs((int)sample));
                         if(peak<3)strength=0;
                         session.writeFrame(frameData,strength);
-                        nativeBlocks=session.frames();
+                        nativeBlocks=session.frames();nativeDropped=session.dropped();
+                        if(!session.alive())throw new IllegalStateException(session.recentLog());
                     });
                 }catch(Exception e){routeMessage="Native FIFO streaming error: "+e.getMessage();state(routeMessage,false);break;}
             }else motor.onPcm(pcm,count,sampleRate,settings);
@@ -143,7 +145,7 @@ public final class PlaybackCaptureService extends Service {
                 int pulses=nativeMode?nativeBlocks:motor.pulseCount();
                 handler.post(()->{Listener l=listener;if(l!=null)l.onCaptureFrame(frame,pulses);});
             }
-            if(silent==150)state("No capturable audio detected: app may block capture",true);
+            if(silent==300)state("No capturable audio detected: app may block capture",true);
         }
         if(active.get()){shutdown();stopSelf();}
     }

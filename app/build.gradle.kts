@@ -9,8 +9,8 @@ android {
         applicationId = "dev.surfacespeaker.lab03"
         minSdk = 31
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.9.0"
+        versionCode = 10
+        versionName = "0.10.0"
     }
     buildFeatures { aidl = true }
     compileOptions {

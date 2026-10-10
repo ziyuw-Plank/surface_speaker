@@ -1,10 +1,10 @@
 package dev.surfacespeaker.app;
 
 /** In-memory playback PCM -> 24 kHz signed 8-bit, 60-500 Hz band-limited motor samples.
- * Never stores or transmits audio. Blocks are 500 ms, and the kernel side is segmented. */
+ * Never stores or transmits audio. Blocks are 60 ms, and the kernel side is segmented. */
 final class LivePcmConverter {
     interface Consumer { void accept(byte[] frame)throws Exception; }
-    private final byte[] block=new byte[12000];
+    private final byte[] block=new byte[RootFifoTester.LiveSession.LIVE_SAMPLES];
     private int used;
     private long inputSample;
     private double nextOutput;
@@ -19,8 +19,8 @@ final class LivePcmConverter {
                 float v=inputSample==0?x:last+(x-last)*(float)Math.max(0,Math.min(1,nextOutput-(inputSample-1)));
                 hp=a*(hp+v-old);old=v;lp+=b*(hp-lp);
                 // Gentle compression restores quiet passages while leaving headroom.
-                int sample=Math.round((float)Math.tanh(lp*4.0)*64);
-                if(sample>64)sample=64;if(sample< -64)sample=-64;
+                int sample=Math.round((float)Math.tanh(lp*4.8)*76);
+                if(sample>76)sample=76;if(sample< -76)sample=-76;
                 block[used++]=(byte)sample;
                 if(used==block.length){consumer.accept(block.clone());used=0;}
                 nextOutput+=(double)rate/24000;
