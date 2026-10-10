@@ -30,6 +30,11 @@ public final class PlaybackCaptureService extends Service {
     }
     static volatile Listener listener;
     static volatile boolean running;
+    static volatile boolean preferNativeFifo;
+    static volatile String routeMessage="Idle";
+    static volatile int nativeBlocks;
+    static void setNativeRoute(boolean requested){preferNativeFifo=requested;}
+
     private static volatile HapticEngine.Tune settings=HapticEngine.preset(0);
     static void updateTune(HapticEngine.Tune tune){settings=tune.copy();}
     private final Handler handler=new Handler(Looper.getMainLooper());
@@ -38,6 +43,7 @@ public final class PlaybackCaptureService extends Service {
     private MediaProjection projection;
     private Thread captureThread;
     private HapticEngine motor;
+    private volatile RootFifoTester.LiveSession liveSession;
 
     private void state(String s,boolean active){
         handler.post(()->{Listener l=listener;if(l!=null)l.onCaptureState(s,active);});
@@ -92,6 +98,21 @@ public final class PlaybackCaptureService extends Service {
     }
     private void captureLoop(int sampleRate){
         AudioAnalysis fft=new AudioAnalysis();short[] pcm=new short[AudioAnalysis.N];long lastUi=0;
+        final boolean nativeMode=preferNativeFifo && RootFifoTester.deviceCandidate();
+        final LivePcmConverter converter=nativeMode?new LivePcmConverter():null;
+        nativeBlocks=0;
+        if(nativeMode){
+            try{
+                liveSession=RootFifoTester.openLive(this);
+                motor.setEnabled(false);
+                routeMessage="Native FIFO: buffering 500ms blocks; possible seams";
+                state(routeMessage,true);
+            }catch(Exception e){
+                routeMessage="Native FIFO unavailable: "+e.getMessage();
+                state(routeMessage,false);shutdown();stopSelf();return;
+            }
+        }else{routeMessage="Android Haptics compatibility";}
+
         int silent=0;
         while(active.get()){
             int count;
@@ -100,11 +121,26 @@ public final class PlaybackCaptureService extends Service {
             if(count<256)continue;
             AudioAnalysis.Frame frame=fft.analyze(pcm,count,sampleRate);
             if(frame.rms<0.006f)silent++;else silent=0;
-            motor.onPcm(pcm,count,sampleRate,settings);
+            if(nativeMode){
+                try{
+                    converter.consume(pcm,count,sampleRate,frameData->{
+                        RootFifoTester.LiveSession session=liveSession;
+                        if(session==null)throw new IllegalStateException("Native root stream stopped");
+                        HapticEngine.Tune nowTune=settings;
+                        float level=motor.effectiveOutputScale(nowTune);
+                        // Square-root law keeps dynamics audible at normal system volume.
+                        int strength=level<=0f?0:Math.max(1,Math.min(40,Math.round(40f*(float)Math.sqrt(level))));
+                        int peak=0;for(byte sample:frameData)peak=Math.max(peak,Math.abs((int)sample));
+                        if(peak<3)strength=0;
+                        session.writeFrame(frameData,strength);
+                        nativeBlocks=session.frames();
+                    });
+                }catch(Exception e){routeMessage="Native FIFO streaming error: "+e.getMessage();state(routeMessage,false);break;}
+            }else motor.onPcm(pcm,count,sampleRate,settings);
             long now=android.os.SystemClock.uptimeMillis();
             if(now-lastUi>65){
                 lastUi=now;
-                int pulses=motor.pulseCount();
+                int pulses=nativeMode?nativeBlocks:motor.pulseCount();
                 handler.post(()->{Listener l=listener;if(l!=null)l.onCaptureFrame(frame,pulses);});
             }
             if(silent==150)state("No capturable audio detected: app may block capture",true);
@@ -115,6 +151,8 @@ public final class PlaybackCaptureService extends Service {
         if(!active.getAndSet(false)&&recorder==null&&projection==null)return;
         running=false;
         if(motor!=null)motor.setEnabled(false);
+        RootFifoTester.LiveSession session=liveSession;liveSession=null;
+        if(session!=null)session.close();
         AudioRecord r=recorder;recorder=null;
         if(r!=null){try{r.stop();}catch(Exception ignored){}try{r.release();}catch(Exception ignored){}}
         MediaProjection p=projection;projection=null;

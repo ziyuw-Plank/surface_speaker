@@ -96,6 +96,7 @@ public final class MainActivity extends Activity {
         Shizuku.addRequestPermissionResultListener(shizukuPermissionListener);
         updateCapabilityButtons();
         PlaybackCaptureService.updateTune(tune);
+        PlaybackCaptureService.setNativeRoute(fifoPreferred);
     }
     private void loadPrefs(){
         android.content.SharedPreferences p=getSharedPreferences("tune",MODE_PRIVATE);
@@ -152,7 +153,7 @@ public final class MainActivity extends Activity {
         LinearLayout top=row();top.setPadding(d(20),d(15),d(20),d(8));
         TextView brand=text("S / S",18,ACCENT,true);brand.setLetterSpacing(.18f);top.addView(brand);
         TextView heading=text("  SURFACE SPEAKER",17,TEXT,true);top.addView(heading);
-        TextView version=text("  v0.8",11,MUTED,false);top.addView(version);
+        TextView version=text("  v0.9",11,MUTED,false);top.addView(version);
         shell.addView(top,lp(-1,54));
         FrameLayout frame=new FrameLayout(this);shell.addView(frame,new LinearLayout.LayoutParams(-1,0,1));
         for(int i=0;i<4;i++){
@@ -167,7 +168,7 @@ public final class MainActivity extends Activity {
                 statusLabel=text(t("等待音频信号","Waiting for audio"),12,ACCENT,false);
                 statusLabel.setGravity(Gravity.CENTER);page.addView(statusLabel);
                 LinearLayout live=card(page);
-                header(live,t("实时音乐","LIVE AUDIO"),t("Android 将音频捕获放在屏幕共享授权下；本应用不会采集屏幕画面","Android asks screen-sharing permission for audio; no screen video is recorded"));
+                header(live,t("实时音乐 · FIFO 优先","LIVE AUDIO · FIFO FIRST"),t("小米设备默认使用分段原生 FIFO，约 500 ms 缓冲；系统仍需要音频捕获授权，不读取画面。","Xiaomi defaults to buffered Native FIFO (500ms). Android audio-only capture consent is still required."));
                 captureButton=button(t("开始实时捕获","Start live capture"));live.addView(captureButton,lp(-1,52));
                 captureButton.setOnClickListener(v->{if(PlaybackCaptureService.running)stopCapture();else if(!requestingCapture)startCapture();});
                 captureStatus=text(t("未激活","Inactive"),13,MUTED,false);
@@ -184,13 +185,13 @@ public final class MainActivity extends Activity {
             }else if(i==1){
                 TextView title=text(t("本地音乐","LOCAL AUDIO"),22,TEXT,true);page.addView(title);
                 LinearLayout playback=card(page);
-                header(playback,t("播放器","PLAYER"),t("选中文件后自动准备并播放；无需 Root","Select audio to play immediately; no root needed"));
+                header(playback,t("播放器","PLAYER"),t("默认 FIFO 需要 Root；兼容模式使用 Android 扬声器与振动","Native FIFO requires Root; compatibility mode uses Android audio and haptics"));
                 trackLabel=text(t("尚未选择音乐","No track selected"),14,TEXT,false);trackLabel.setPadding(0,0,0,d(12));playback.addView(trackLabel);
                 Button choose=subtle(t("选择音频文件","Choose audio file"));playback.addView(choose,lp(-1,50));choose.setOnClickListener(v->openFile());
                 fifoRouteButton=subtle("");LinearLayout.LayoutParams rpRoute=lp(-1,46);rpRoute.topMargin=d(10);playback.addView(fifoRouteButton,rpRoute);
                 fifoRouteButton.setOnClickListener(v->{
-                    if(nativePreviewBusy){notifyStatus(t("先结束正在运行的 FIFO","Stop the running FIFO first"));return;}
-                    stop();fifoPreferred=!fifoPreferred;savePrefs();updatePlaybackRoute();updateDashboard();
+                    if(nativePreviewBusy || PlaybackCaptureService.running){notifyStatus(t("请先停止实时捕获或原生 FIFO","Stop live capture/native FIFO before changing routes"));return;}
+                    stop();fifoPreferred=!fifoPreferred;savePrefs();PlaybackCaptureService.setNativeRoute(fifoPreferred);updatePlaybackRoute();updateDashboard();
                 });
                 routeStatus=text("",12,MUTED,false);routeStatus.setPadding(0,d(8),0,d(5));routeStatus.setTextIsSelectable(true);playback.addView(routeStatus);
                 Button quickProbe=subtle(t("检测 FIFO / Root 是否可用","Check FIFO / Root access"));playback.addView(quickProbe,lp(-1,45));
@@ -327,8 +328,7 @@ public final class MainActivity extends Activity {
         }
         if(routeStatus!=null && !nativePreviewBusy){
             routeStatus.setText(fifoPreferred?
-                t("选择本地音频后，按播放才会调用 Root FIFO。当前仅播放前 4 秒，不能全曲连续或抓取其他 App 的 FIFO。失败详情会显示在这里。",
-                  "Select local audio, then Play to invoke Root FIFO. Currently first 4 seconds only, not full-song or live-app FIFO. Errors will appear here."):
+                t("本地文件仍为前 4 秒 FIFO 预览；系统实时捕获使用分段 FIFO（约 500ms），可能有拼接间隙。", "Local FIFO preview remains 4s. Live capture sends buffered 500ms FF_CUSTOM segments, with possible gaps."):
                 t("兼容模式使用 Android Vibrator；不等于连续 PCM 波形。","Compatibility uses Android Vibrator, not continuous PCM."));
         }
         if(playButton!=null && !nativePreviewBusy && (player==null || !player.isPlaying())){
@@ -363,7 +363,7 @@ public final class MainActivity extends Activity {
             if(now-lastNativeTestMs<2000){notifyStatus(t("测试冷却中，请勿频繁重试","Cooldown active; avoid rapid testing"));return;}
             lastNativeTestMs=now;
         }
-        int strength=Math.round(engine.effectiveOutputScale(tune)*25f);
+        int strength=nativeStrength();
         if(test && strength<1){notifyStatus(t("当前音量联动为静音，未驱动马达","Media volume is muted; no native effect sent"));return;}
         if(fifoStatus!=null)fifoStatus.setText(t("正在调用 Root 原生工具…","Running native tool via Root…"));
         if(routeStatus!=null)routeStatus.setText(t("正在检测设备权限和 EV_FF…","Checking Root and EV_FF permissions…"));
@@ -378,9 +378,8 @@ public final class MainActivity extends Activity {
     }
     private int nativeStrength(){
         float level=engine.effectiveOutputScale(tune);
-        // Keep exact mute, but compensate for quadratic attenuation when both PCM and effect
-        // magnitude are capped. Still limited to <= 22% effect magnitude and <= 48/127 samples.
-        return level<=0f?0:Math.max(1,Math.round(22f*(float)Math.sqrt(level)));
+        // Conservative ceiling with perceptual attenuation; 40% is not measured displacement.
+        return level<=0f?0:Math.max(1,Math.min(40,Math.round(40f*(float)Math.sqrt(level))));
     }
     private void runLongTone(){
         if(nativePreviewBusy || PlaybackCaptureService.running){
@@ -391,7 +390,7 @@ public final class MainActivity extends Activity {
         nativePreviewBusy=true;
         notifyStatus(t("正在发送 2 秒连续波形…","Sending 2-second continuous FIFO tone…"));
         new Thread(()->{
-            String out=RootFifoTester.longTone(getApplicationContext(),200,Math.min(25,strength));
+            String out=RootFifoTester.longTone(getApplicationContext(),200,Math.min(40,strength));
             ui.post(()->{nativePreviewBusy=false;if(fifoStatus!=null)fifoStatus.setText(out);notifyStatus(out);});
         },"fifo-long-tone").start();
     }
@@ -410,7 +409,7 @@ public final class MainActivity extends Activity {
         notifyStatus(t("解码前 4 秒并一次性上传 FIFO…","Decoding first 4s for a single FIFO upload…"));
         Uri selected=file;
         new Thread(()->{
-            String out=RootFifoTester.localPreview(getApplicationContext(),selected,Math.min(25,strength));
+            String out=RootFifoTester.localPreview(getApplicationContext(),selected,Math.min(40,strength));
             ui.post(()->{
                 nativePreviewBusy=false;
                 if(continuousPreviewButton!=null){continuousPreviewButton.setText(t("预览 4 秒连续马达音频","Preview 4s continuous motor audio"));disabled(continuousPreviewButton,RootFifoTester.deviceCandidate());}
@@ -430,7 +429,7 @@ public final class MainActivity extends Activity {
         }
     }
     private void startCapture(){
-        requestingCapture=true;updateDashboard();
+        requestingCapture=true;PlaybackCaptureService.setNativeRoute(fifoPreferred);updateDashboard();
         if(!engine.features.present){requestingCapture=false;updateDashboard();notifyStatus(t("马达不可用","Vibrator unavailable"));return;}
         if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){
             pendingCapture=true;requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},REQUEST_RECORD);return;
@@ -455,7 +454,7 @@ public final class MainActivity extends Activity {
             captureButton.setAlpha(requestingCapture && !live?0.72f:1f);
         }
         if(captureStatus!=null){
-            captureStatus.setText(live?t("● 正在分析系统播放音频","● Capturing playback audio")
+            captureStatus.setText(live?(fifoPreferred?t("● FIFO 分段实时捕获 · 约 500ms 缓冲","● Live buffered FIFO · 500ms segments"):t("● Android 兼容捕获","● Android compatibility capture"))
                 :requestingCapture?t("等待音频权限与系统同意","Waiting for system consent")
                 :t("实时捕获未激活","Live capture inactive"));
             captureStatus.setTextColor(live?ACCENT:MUTED);
@@ -770,7 +769,7 @@ public final class MainActivity extends Activity {
             @Override public void onCaptureFrame(AudioAnalysis.Frame frame,int pulses){
                 if(spectrum!=null){spectrum.setPlaying(true);spectrum.pushSpectrum(frame.bars,frame.rms);}
                 if(inputStatus!=null)inputStatus.setText(t("音频信号：","Audio signal: ")+Math.round(frame.rms*100)+"%");
-                if(motorStatus!=null)motorStatus.setText(t("已发送振动指令：","Motor commands issued: ")+pulses);
+                if(motorStatus!=null)motorStatus.setText((fifoPreferred?t("已发送至原生进程的 FIFO 段数：","Blocks sent to native FIFO process: "):t("兼容振动指令：","Compat haptic commands: "))+pulses);
                 updateVolumeControls();
             }
             @Override public void onCaptureState(String status,boolean active){
