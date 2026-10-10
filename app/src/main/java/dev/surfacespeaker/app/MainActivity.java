@@ -42,7 +42,7 @@ import rikka.shizuku.Shizuku;
 
 public final class MainActivity extends Activity {
     private static final int REQUEST_FILE=91,REQUEST_RECORD=92,REQUEST_EXPORT=93,REQUEST_SHIZUKU=94,REQUEST_CAPTURE=95;
-    private static final int BACK=0xff111410, PANEL=0xff1d231a, TEXT=0xffeef2e8;
+    private static final int BACK=0xff0b0f0a, PANEL=0xff172019, TEXT=0xffeef2e8;
     private static final int MUTED=0xffabb5a4, DISABLED=0xff64705e, ACCENT=0xffc9fb74;
     private final Handler ui=new Handler(Looper.getMainLooper());
     private final boolean zh=Locale.getDefault().getLanguage().equalsIgnoreCase("zh");
@@ -144,7 +144,7 @@ public final class MainActivity extends Activity {
     private LinearLayout row(){LinearLayout l=new LinearLayout(this);l.setOrientation(LinearLayout.HORIZONTAL);l.setGravity(Gravity.CENTER_VERTICAL);return l;}
     private LinearLayout.LayoutParams lp(int w,int h){return new LinearLayout.LayoutParams(w<0?w:d(w),h<0?h:d(h));}
     private LinearLayout card(LinearLayout root){
-        LinearLayout c=column();c.setPadding(d(18),d(19),d(18),d(19));c.setBackground(background(PANEL,22));
+        LinearLayout c=column();c.setPadding(d(18),d(19),d(18),d(19));GradientDrawable cb=background(PANEL,22);cb.setStroke(d(1),0xff2a3626);c.setBackground(cb);
         LinearLayout.LayoutParams l=lp(-1,-2);l.topMargin=d(15);root.addView(c,l);return c;
     }
     private void header(LinearLayout parent,String s,String summary){
@@ -156,7 +156,7 @@ public final class MainActivity extends Activity {
         LinearLayout top=row();top.setPadding(d(20),d(15),d(20),d(8));
         TextView brand=text("S / S",18,ACCENT,true);brand.setLetterSpacing(.18f);top.addView(brand);
         TextView heading=text("  SURFACE SPEAKER",17,TEXT,true);top.addView(heading);
-        TextView version=text("  v0.13",11,MUTED,false);top.addView(version);
+        TextView version=text("v0.14",11,BACK,true);version.setPadding(d(8),d(2),d(8),d(2));version.setBackground(background(ACCENT,10));LinearLayout.LayoutParams vp=lp(-2,-2);vp.leftMargin=d(10);top.addView(version,vp);
         shell.addView(top,lp(-1,54));
         FrameLayout frame=new FrameLayout(this);shell.addView(frame,new LinearLayout.LayoutParams(-1,0,1));
         for(int i=0;i<4;i++){
@@ -166,7 +166,8 @@ public final class MainActivity extends Activity {
             scroller.addView(page);frame.addView(scroller,new FrameLayout.LayoutParams(-1,-1));
             sections[i]=scroller;
             if(i==0){
-                TextView intro=text(t("把声音变成触觉","Feel the sound"),21,TEXT,true);page.addView(intro);
+                TextView intro=text(t("把声音变成触觉","Feel the sound"),24,TEXT,true);page.addView(intro);
+                TextView tag=text(t("v0.14 骨传导质感：虚拟低音 · 共振抑制 · 中频清晰","v0.14 bone-conduction feel: virtual bass · resonance control · clear mids"),12,MUTED,false);tag.setPadding(0,d(2),0,d(10));page.addView(tag);
                 spectrum=new SpectrumView(this);page.addView(spectrum,lp(-1,270));
                 statusLabel=text(t("等待音频信号","Waiting for audio"),12,ACCENT,false);
                 statusLabel.setGravity(Gravity.CENTER);page.addView(statusLabel);

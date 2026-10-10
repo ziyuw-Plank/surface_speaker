@@ -29,7 +29,7 @@ final class LocalPcmPreview {
         private long sourceIndex;
         private double nextPosition;
         private float last;
-        private final MotorPcmDsp dsp=new MotorPcmDsp();
+        private final MotorPcmDspV14 dsp=new MotorPcmDspV14();
         private final int gain, detail;
         Converter(int gain,int detail,int bassClean,int trebleStable){this.gain=gain;this.detail=detail;dsp.setTuning(bassClean,trebleStable);}
         boolean full(){return count>=MAX_SAMPLES;}

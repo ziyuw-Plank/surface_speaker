@@ -9,7 +9,7 @@ final class LivePcmConverter {
     private long inputSample;
     private double nextOutput;
     private float last;
-    private final MotorPcmDsp dsp=new MotorPcmDsp();
+    private final MotorPcmDspV14 dsp=new MotorPcmDspV14();
     private volatile int gain=58, detail=65;
     LivePcmConverter(int frameSamples){block=new byte[frameSamples];}
     void setTune(int g,int d,int bassClean,int trebleStable){
