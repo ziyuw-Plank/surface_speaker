@@ -150,14 +150,29 @@ final class RootFifoTester {
             marker.delete();temp.delete();busy.set(false);
         }
     }
+    static String richTapProbe(Context context){
+        if(!deviceCandidate())return "DISABLED: shennong only";
+        if(!busy.compareAndSet(false,true))return "ERROR: another native session is active";
+        try{return runPrivileged(context,"probe",0,null,"native_richtap_arm64");}
+        finally{busy.set(false);}
+    }
+    static String richTapTone(Context context){
+        if(!deviceCandidate())return "DISABLED: shennong only";
+        if(!busy.compareAndSet(false,true))return "ERROR: another native session is active";
+        try{return runPrivileged(context,"tone",0,null,"native_richtap_arm64");}
+        finally{busy.set(false);}
+    }
     static LiveSession openLive(Context context,int frameSamples)throws Exception {
+        return openLive(context,frameSamples,false);
+    }
+    static LiveSession openLive(Context context,int frameSamples,boolean richTap)throws Exception {
         if(frameSamples!=1152 && frameSamples!=1440 && frameSamples!=2304)throw new IllegalArgumentException("Unsupported frame samples");
         if(!deviceCandidate())throw new IllegalStateException("Native FIFO only enabled on shennong arm64");
         if(!busy.compareAndSet(false,true))throw new IllegalStateException("Another native FIFO test is active");
         File source=new File(context.getCacheDir(),"surface_fifo_stream_"+System.nanoTime());
         File marker=new File(context.getCacheDir(),"sf-stop-"+System.nanoTime());
         try {
-            try(InputStream in=context.getAssets().open("native_fifo_arm64");FileOutputStream out=new FileOutputStream(source)){
+            try(InputStream in=context.getAssets().open(richTap?"native_richtap_arm64":"native_fifo_arm64");FileOutputStream out=new FileOutputStream(source)){
                 byte[] buffer=new byte[8192];int n;while((n=in.read(buffer))>0)out.write(buffer,0,n);
             }
             String workdir="/data/local/tmp/ssfifo-stream-"+Long.toHexString(System.nanoTime());
@@ -172,13 +187,16 @@ final class RootFifoTester {
         }catch(Exception e){source.delete();marker.delete();busy.set(false);throw e;}
     }
     private static String runPrivileged(Context context,String args,int strength,File pcm){
+        return runPrivileged(context,args,strength,pcm,"native_fifo_arm64");
+    }
+    private static String runPrivileged(Context context,String args,int strength,File pcm,String asset){
         File source=new File(context.getCacheDir(),"surface_fifo_arm64");
         String workdir="/data/local/tmp/ssfifo-"+java.util.UUID.randomUUID().toString().replace("-","").substring(0,16);
         String executable=workdir+"/fifo",remotePcm=workdir+"/preview.raw";
         Process process=null;
         File marker=new File(context.getCacheDir(),"ssfifo-stop-"+java.util.UUID.randomUUID().toString().substring(0,12));
         stopMarker=marker;
-        try(InputStream in=context.getAssets().open("native_fifo_arm64");FileOutputStream out=new FileOutputStream(source)){
+        try(InputStream in=context.getAssets().open(asset);FileOutputStream out=new FileOutputStream(source)){
             byte[] b=new byte[8192];int n;while((n=in.read(b))>0)out.write(b,0,n);
         }catch(Exception e){return "ERROR:extract native helper: "+e.getMessage();}
         try {

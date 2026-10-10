@@ -36,7 +36,9 @@ public final class PlaybackCaptureService extends Service {
     static volatile int nativeDropped;
     static volatile int nativeProcessingMs;
     static volatile int activeFrameMs;
+    static volatile boolean richTapExperiment;
     static void setNativeRoute(boolean requested){preferNativeFifo=requested;}
+    static void setRichTapExperiment(boolean enabled){richTapExperiment=enabled;}
 
     private static volatile HapticEngine.Tune settings=HapticEngine.preset(0);
     static void updateTune(HapticEngine.Tune tune){settings=tune.copy();}
@@ -104,6 +106,7 @@ public final class PlaybackCaptureService extends Service {
     private void captureLoop(int sampleRate){
         AudioAnalysis fft=new AudioAnalysis();short[] pcm=new short[512];long lastUi=0;
         final boolean nativeMode=preferNativeFifo && RootFifoTester.deviceCandidate();
+        final boolean richTapMode=nativeMode && richTapExperiment;
         // 48ms response (more restarts), 60ms balanced, 96ms smoother (more latency).
         final int frameMs=settings.liveFrameMs==96?96:settings.liveFrameMs==60?60:48;
         final int frameSamples=frameMs*24;
@@ -111,9 +114,10 @@ public final class PlaybackCaptureService extends Service {
         nativeBlocks=0;nativeDropped=0;nativeProcessingMs=0;activeFrameMs=frameMs;
         if(nativeMode){
             try{
-                liveSession=RootFifoTester.openLive(this,frameSamples);
+                liveSession=RootFifoTester.openLive(this,frameSamples,richTapMode);
                 motor.setEnabled(false);
-                routeMessage="Native FIFO "+frameMs+"ms chunks; FF_CUSTOM restarts between effects";
+                routeMessage=richTapMode?"RichTap mmap STREAM_MODE (20s validation only)":
+                    "Native FIFO "+frameMs+"ms chunks; FF_CUSTOM restarts between effects";
                 state(routeMessage,true);
             }catch(Exception e){
                 routeMessage="Native FIFO unavailable: "+e.getMessage();
