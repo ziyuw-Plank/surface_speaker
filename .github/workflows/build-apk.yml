@@ -20,9 +20,11 @@ jobs:
       - name: SDK 36 (hosted runner)
         run: |
           echo "ANDROID_HOME=${ANDROID_HOME}"
-          command -v sdkmanager
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -1)"
+          test -x "$SDKMANAGER"
+          echo "Using $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" 'platforms;android-36' 'build-tools;35.0.0'
       - name: Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
         with:
