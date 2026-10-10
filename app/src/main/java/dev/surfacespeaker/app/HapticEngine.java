@@ -1,6 +1,7 @@
 package dev.surfacespeaker.app;
 
 import android.content.Context;
+import android.media.AudioManager;
 import android.media.audiofx.HapticGenerator;
 import android.os.Build;
 import android.os.SystemClock;
@@ -20,7 +21,9 @@ final class HapticEngine {
     }
     static final class Tune {
         int gain = 58, bass=68, gate=6, smoothing=45, pulse=60, frequency=130, speaker=55;
-        Tune copy() {Tune t=new Tune();t.gain=gain;t.bass=bass;t.gate=gate;t.smoothing=smoothing;t.pulse=pulse;t.frequency=frequency;t.speaker=speaker;return t;}
+        boolean followVolume=true;
+        int volumeRatio=65; // percentage of the app's capped haptic output
+        Tune copy() {Tune t=new Tune();t.gain=gain;t.bass=bass;t.gate=gate;t.smoothing=smoothing;t.pulse=pulse;t.frequency=frequency;t.speaker=speaker;t.followVolume=followVolume;t.volumeRatio=volumeRatio;return t;}
     }
     static Tune preset(int i) {
         Tune t=new Tune();
@@ -29,6 +32,9 @@ final class HapticEngine {
         return t;
     }
     final Vibrator motor;
+    private final AudioManager audioManager;
+    private long lastVolumeRead;
+    private float cachedMediaFraction=1f;
     final Features features=new Features();
     private long lastPulse, totalMotionSince;
     private int outputPulses;
@@ -45,6 +51,7 @@ final class HapticEngine {
     private long rollingStartMs;
     private boolean enabled;
     HapticEngine(Context context) {
+        audioManager=(AudioManager)context.getSystemService(Context.AUDIO_SERVICE);
         Vibrator m=null;
         if(Build.VERSION.SDK_INT>=31){
             VibratorManager manager=(VibratorManager)context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE);
@@ -67,6 +74,23 @@ final class HapticEngine {
                 features.minSegmentMs=env.getMinControlPointDurationMillis();
             }
         }catch(Throwable ignored) {features.envelope=false;}
+    }
+    /** Media volume is the Android STREAM_MUSIC index; this does not claim measured SPL. */
+    synchronized float mediaVolumeFraction() {
+        long now=SystemClock.uptimeMillis();
+        if(now-lastVolumeRead>180 || lastVolumeRead==0){
+            lastVolumeRead=now;
+            if(audioManager!=null){
+                try {
+                    int max=audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+                    cachedMediaFraction=max>0 ? Math.max(0f,Math.min(1f,(float)audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)/max)) : 0f;
+                } catch(Exception ignored){}
+            }
+        }
+        return cachedMediaFraction;
+    }
+    float effectiveOutputScale(Tune t) {
+        return Math.max(0,Math.min(1,t.volumeRatio/100f))*(t.followVolume?mediaVolumeFraction():1f);
     }
     void setEnabled(boolean enabled){this.enabled=enabled;if(!enabled)stop();}
     boolean isEnabled(){return enabled;}
@@ -103,7 +127,7 @@ final class HapticEngine {
                 float attack=0.48f-t.smoothing/100f*0.18f;
                 float release=0.30f-t.smoothing/100f*0.23f;
                 envelopeLevel+=(target-envelopeLevel)*(target>envelopeLevel?attack:release);
-                int amp=(int)Math.min(170, Math.max(0, Math.round(185f*envelopeLevel)));
+                int amp=(int)Math.min(170, Math.max(0, Math.round(185f*envelopeLevel*effectiveOutputScale(t))));
                 if(amp<13)amp=0;
                 int slot=envelopeCount++;
                 envelopeDurations[slot]=Math.max(5,Math.round(segmentCountDuration(perSegment,sampleRate)));
@@ -143,7 +167,8 @@ final class HapticEngine {
         float gate=t.gate/100f*0.25f;
         if(smooth<gate)return;
         // Sensible signal-dependent intensity, large enough to feel while remaining capped.
-        float intensity=Math.min(.67f, Math.max(.12f, (.18f+smooth*1.35f)*(t.gain/100f)));
+        float intensity=Math.min(.67f, Math.max(0f, (.18f+smooth*1.35f)*(t.gain/100f)))*effectiveOutputScale(t);
+        if(intensity<.03f)return;
         long pulse=Math.min(65,Math.max(25,t.pulse));
         if(now-lastPulse<Math.max(95,pulse+40))return;
         if(totalMotionSince==0)totalMotionSince=now;
@@ -175,7 +200,11 @@ final class HapticEngine {
                 long seg=Math.max(50,features.minSegmentMs);
                 motor.vibrate(new VibrationEffect.WaveformEnvelopeBuilder()
                     .addControlPoint(0.12f,f,seg).addControlPoint(0,f,seg).build());
-            }else motor.vibrate(VibrationEffect.createOneShot(140,features.amplitude?110:VibrationEffect.DEFAULT_AMPLITUDE));
+            }else {
+                int strength=Math.max(0,Math.min(110,Math.round(110*effectiveOutputScale(t))));
+                if(strength==0)return;
+                motor.vibrate(VibrationEffect.createOneShot(110,features.amplitude?Math.max(1,strength):VibrationEffect.DEFAULT_AMPLITUDE));
+            }
         }catch(Exception e){lastOutputError=e.getClass().getSimpleName()+": "+e.getMessage();}
     }
 }

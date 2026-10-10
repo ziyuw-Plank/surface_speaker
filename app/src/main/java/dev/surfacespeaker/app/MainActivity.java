@@ -14,6 +14,7 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.media.AudioAttributes;
+import android.media.AudioManager;
 import android.media.projection.MediaProjectionManager;
 import android.provider.OpenableColumns;
 import android.database.Cursor;
@@ -58,9 +59,12 @@ public final class MainActivity extends Activity {
     private TextView message, trackLabel, statusLabel, presetLabel, authorization, inputStatus, motorStatus, captureStatus;
     private Button captureButton;
     private boolean requestingCapture=false;
+    private long lastNativeTestMs=0;
     private final ScrollView[] sections=new ScrollView[4];
     private final Button[] dock=new Button[4];
     private Button playButton, envelopeButton, nativeButton, shizukuButton;
+    private TextView volumeLinkStatus, fifoStatus;
+    private Button volumeFollowButton;
     private final Button[] presetButtons=new Button[4];
     private final java.util.ArrayList<SeekBar> tuneBars=new java.util.ArrayList<>();
     private final java.util.ArrayList<TextView> tuneLabels=new java.util.ArrayList<>();
@@ -96,6 +100,8 @@ public final class MainActivity extends Activity {
             tune.gate=p.getInt("gate",20);tune.smoothing=p.getInt("smooth",55);
             tune.pulse=Math.max(40,p.getInt("pulse",60));tune.frequency=p.getInt("freq",130);
             tune.speaker=p.getInt("speaker",35);
+            tune.volumeRatio=p.getInt("volumeRatio",65);
+            tune.followVolume=p.getBoolean("followVolume",true);
         }
         useEnvelope=p.getBoolean("envelope",true);
         useNative=p.getBoolean("native",false);
@@ -105,7 +111,8 @@ public final class MainActivity extends Activity {
         .putInt("bass",tune.bass).putInt("gate",tune.gate)
         .putInt("smooth",tune.smoothing).putInt("pulse",tune.pulse)
         .putInt("freq",tune.frequency).putInt("speaker",tune.speaker)
-        .putBoolean("envelope",useEnvelope).putBoolean("native",useNative).apply();}
+        .putBoolean("envelope",useEnvelope).putBoolean("native",useNative)
+        .putInt("volumeRatio",tune.volumeRatio).putBoolean("followVolume",tune.followVolume).apply();}
     private int d(float size){return (int)(size*getResources().getDisplayMetrics().density+0.5f);}
     private GradientDrawable background(int color,int radius){GradientDrawable b=new GradientDrawable();b.setColor(color);b.setCornerRadius(d(radius));return b;}
     private TextView text(String s,int sp,int color,boolean bold){
@@ -137,7 +144,7 @@ public final class MainActivity extends Activity {
         LinearLayout top=row();top.setPadding(d(20),d(15),d(20),d(8));
         TextView brand=text("S / S",18,ACCENT,true);brand.setLetterSpacing(.18f);top.addView(brand);
         TextView heading=text("  SURFACE SPEAKER",17,TEXT,true);top.addView(heading);
-        TextView version=text("  v0.5",11,MUTED,false);top.addView(version);
+        TextView version=text("  v0.6",11,MUTED,false);top.addView(version);
         shell.addView(top,lp(-1,54));
         FrameLayout frame=new FrameLayout(this);shell.addView(frame,new LinearLayout.LayoutParams(-1,0,1));
         for(int i=0;i<4;i++){
@@ -203,6 +210,13 @@ public final class MainActivity extends Activity {
                    engine.features.envelope?(int)Math.floor(engine.features.maxHz):500,
                    tune.frequency,true,v->tune.frequency=v);
                 slider(adjust,t("本地音量","Local player volume"),0,100,tune.speaker,false,v->{tune.speaker=v;if(player!=null)player.setVolume(v/100f,v/100f);});
+                LinearLayout volume=card(page);
+                header(volume,t("音量联动","VOLUME LINK"),t("根据系统媒体音量同比例缩放振动，静音时不输出","Scale motor with system media volume; muted = no motor output"));
+                volumeFollowButton=subtle("");volume.addView(volumeFollowButton,lp(-1,46));
+                volumeFollowButton.setOnClickListener(v->{tune.followVolume=!tune.followVolume;preset=3;savePrefs();PlaybackCaptureService.updateTune(tune);updateVolumeControls();});
+                slider(volume,t("振动强度比例 %","Motor strength ratio %"),0,100,tune.volumeRatio,false,v->{tune.volumeRatio=v;updateVolumeControls();});
+                volumeLinkStatus=text("",12,MUTED,false);volumeLinkStatus.setPadding(0,d(10),0,0);volume.addView(volumeLinkStatus);
+                updateVolumeControls();
                 LinearLayout routes=card(page);
                 header(routes,t("输出路径","OUTPUT ROUTES"),t("不可用时禁用，不虚报支持","Disabled when hardware support is absent"));
                 envelopeButton=subtle("");routes.addView(envelopeButton,lp(-1,48));
@@ -223,6 +237,29 @@ public final class MainActivity extends Activity {
                 disabled(test,engine.features.present);test.setOnClickListener(v->{engine.test(tune,false);notifyStatus(t("已请求原生振动；","Native vibration requested; ")+engine.lastError());});
                 Button vendor=subtle(t("小米 HE 短振动试验","Xiaomi HE short test"));LinearLayout.LayoutParams vt=lp(-1,48);vt.topMargin=d(8);probe.addView(vendor,vt);
                 disabled(vendor,engine.features.vendorClass);vendor.setOnClickListener(v->{new Thread(()->{String out=MiHapticProbe.shortTest();ui.post(()->notifyStatus(out));},"vendor-test").start();});
+                LinearLayout experimental=card(page);
+                header(experimental,t("Qualcomm FIFO · 实验引擎","Qualcomm FIFO · EXPERIMENTAL"),
+                    t("仅 Xiaomi 14 Pro。短时低强度自定义波形，不支持连续音乐流；Root 权限和驱动协议必须实际可用。",
+                      "Xiaomi 14 Pro only. Short low-power waveform tests, NOT continuous music. Requires working Root + compatible driver."));
+                fifoStatus=text(RootFifoTester.deviceCandidate()?t("状态：需要检测","Status: run probe"):
+                    t("此机型不支持该实验模块","Not available for this model"),12,MUTED,false);
+                fifoStatus.setTextIsSelectable(true);experimental.addView(fifoStatus);
+                Button fifoProbe=subtle(t("只读检查 FF_CUSTOM 接口","Read-only FF_CUSTOM probe"));
+                LinearLayout.LayoutParams fp=lp(-1,46);fp.topMargin=d(8);experimental.addView(fifoProbe,fp);
+                fifoProbe.setEnabled(RootFifoTester.deviceCandidate());fifoProbe.setAlpha(fifoProbe.isEnabled()?1f:.3f);
+                fifoProbe.setOnClickListener(v->runFifo(false,200));
+                LinearLayout tones=row();LinearLayout.LayoutParams tp=lp(-1,47);tp.topMargin=d(8);experimental.addView(tones,tp);
+                for(int hz:new int[]{120,200,300}){
+                    Button tone=subtle(hz+" Hz");LinearLayout.LayoutParams bp=new LinearLayout.LayoutParams(0,d(46),1);
+                    if(hz!=120)bp.leftMargin=d(8);tones.addView(tone,bp);
+                    tone.setEnabled(RootFifoTester.deviceCandidate());tone.setAlpha(tone.isEnabled()?1f:.3f);
+                    tone.setOnClickListener(v->new AlertDialog.Builder(this)
+                        .setTitle(t("短时实验波形","Experimental waveform"))
+                        .setMessage(t("Root 将通过 EVIOCSFF 写入一段 50ms、24kHz 的低幅度波形。会使马达运动。未在本机验证真实频响。测试前请将手机置于桌面并避免连续重复试验。",
+                          "Root will submit a 50ms, 24kHz low-amplitude effect using EVIOCSFF. The motor may move. Response is not yet measured. Place the phone on a table and avoid rapid repeated tests."))
+                        .setNegativeButton(t("取消","Cancel"),null)
+                        .setPositiveButton(t("执行一次","Test once"),(dd,which)->runFifo(true,hz)).show());
+                }
                 Button export=subtle(t("导出驱动报告","Export diagnostics"));LinearLayout.LayoutParams et=lp(-1,48);et.topMargin=d(8);probe.addView(export,et);export.setOnClickListener(v->exportReport());
                 message=text(t("本应用不会更改 AVB、SELinux 或系统分区。","No changes to AVB, SELinux or system partitions."),12,MUTED,false);
                 message.setTextIsSelectable(true);message.setPadding(0,d(14),0,0);probe.addView(message);
@@ -237,6 +274,40 @@ public final class MainActivity extends Activity {
         }
         shell.addView(nav,lp(-1,76));setContentView(shell);
         showTab(0);refreshSliders();refreshPresets();updateCapabilityButtons();
+    }
+    private void updateVolumeControls(){
+        if(volumeFollowButton!=null){
+            volumeFollowButton.setText(t("跟随系统媒体音量：","Follow system media volume: ")+
+                (tune.followVolume?t("已开启","On"):t("已关闭","Off")));
+            volumeFollowButton.setBackground(background(tune.followVolume?0xff357c62:0xff353c30,14));
+        }
+        if(volumeLinkStatus!=null && engine!=null){
+            int media=Math.round(100*engine.mediaVolumeFraction());
+            int linked=Math.round(100*engine.effectiveOutputScale(tune));
+            volumeLinkStatus.setText(t("系统媒体音量：","System media volume: ")+media+
+                "%  ·  "+t("相对振动比例：","Relative motor scale: ")+linked+"%"+
+                "\n"+t("这是驱动请求比例，不是实际声压或机械振幅。","Requested output scale, not measured acoustic loudness or motor displacement."));
+        }
+    }
+    private void runFifo(boolean test,int hz){
+        if(test && (PlaybackCaptureService.running || (player!=null && player.isPlaying()))){
+            notifyStatus(t("请先停止音频播放再进行短波形测试","Stop playback/capture before short waveform test"));return;
+        }
+        if(test){
+            long now=android.os.SystemClock.uptimeMillis();
+            if(now-lastNativeTestMs<2000){notifyStatus(t("测试冷却中，请勿频繁重试","Cooldown active; avoid rapid testing"));return;}
+            lastNativeTestMs=now;
+        }
+        int strength=Math.round(engine.effectiveOutputScale(tune)*25f);
+        if(test && strength<1){notifyStatus(t("当前音量联动为静音，未驱动马达","Media volume is muted; no native effect sent"));return;}
+        if(fifoStatus!=null)fifoStatus.setText(t("正在调用 Root 原生工具…","Running native tool via Root…"));
+        new Thread(()->{
+            String result=RootFifoTester.run(getApplicationContext(),test,hz,Math.max(1,strength));
+            ui.post(()->{
+                if(fifoStatus!=null)fifoStatus.setText(result);
+                notifyStatus(result.length()>110?result.substring(0,110):result);
+            });
+        },"fifo-experimental").start();
     }
     private void showTab(int which){
         for(int i=0;i<4;i++){
@@ -308,7 +379,7 @@ public final class MainActivity extends Activity {
         });
     }
     private void refreshSliders(){
-        int[] values={tune.gain,tune.bass,tune.gate,tune.smoothing,tune.pulse,tune.frequency,tune.speaker};
+        int[] values={tune.gain,tune.bass,tune.gate,tune.smoothing,tune.pulse,tune.frequency,tune.speaker,tune.volumeRatio};
         for(int i=0;i<tuneBars.size();i++){
             SeekBar s=tuneBars.get(i);int[] bounds=(int[])s.getTag();int val=Math.max(bounds[0],Math.min(bounds[1],values[i]));
             s.setProgress(val-bounds[0]);
@@ -572,20 +643,26 @@ public final class MainActivity extends Activity {
         prepared=false;loading=false;spectrum.setPlaying(false);
         if(playButton!=null)playButton.setText(t("开始播放","Play"));
     }
+    private final Runnable volumeTick=new Runnable(){
+        @Override public void run(){updateVolumeControls();ui.postDelayed(this,700);}
+    };
     @Override protected void onResume(){super.onResume();
+        ui.removeCallbacks(volumeTick);ui.postDelayed(volumeTick,700);
         PlaybackCaptureService.listener=new PlaybackCaptureService.Listener(){
             @Override public void onCaptureFrame(AudioAnalysis.Frame frame,int pulses){
                 if(spectrum!=null){spectrum.setPlaying(true);spectrum.pushSpectrum(frame.bars,frame.rms);}
                 if(inputStatus!=null)inputStatus.setText(t("音频信号：","Audio signal: ")+Math.round(frame.rms*100)+"%");
                 if(motorStatus!=null)motorStatus.setText(t("已发送振动指令：","Motor commands issued: ")+pulses);
+                updateVolumeControls();
             }
             @Override public void onCaptureState(String status,boolean active){
                 requestingCapture=false;notifyStatus(status);updateDashboard();
                 if(!active&&spectrum!=null&&player==null)spectrum.setPlaying(false);
             }
         };
-        if(engine!=null)updateCapabilityButtons();
+        if(engine!=null)updateCapabilityButtons();updateVolumeControls();
     }
+    @Override protected void onPause(){ui.removeCallbacks(volumeTick);super.onPause();}
     @Override protected void onStop(){if(!PlaybackCaptureService.running)stop();super.onStop();}
     @Override protected void onDestroy(){
         if(PlaybackCaptureService.listener!=null)PlaybackCaptureService.listener=null;
