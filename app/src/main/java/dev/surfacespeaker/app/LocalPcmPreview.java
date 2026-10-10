@@ -31,7 +31,7 @@ final class LocalPcmPreview {
         private float last;
         private final MotorPcmDsp dsp=new MotorPcmDsp();
         private final int gain, detail;
-        Converter(int gain,int detail){this.gain=gain;this.detail=detail;}
+        Converter(int gain,int detail,int bassClean,int trebleStable){this.gain=gain;this.detail=detail;dsp.setTuning(bassClean,trebleStable);}
         boolean full(){return count>=MAX_SAMPLES;}
         void put(float value,int inputRate){
             if(full())return;
@@ -57,9 +57,9 @@ final class LocalPcmPreview {
             return new Clip(file,count);
         }
     }
-    static Clip decode(Context context,Uri uri,int gain,int detail) throws Exception {
+    static Clip decode(Context context,Uri uri,int gain,int detail,int bassClean,int trebleStable) throws Exception {
         MediaExtractor extractor=new MediaExtractor();MediaCodec codec=null;
-        Converter cv=new Converter(gain,detail);
+        Converter cv=new Converter(gain,detail,bassClean,trebleStable);
         try {
             extractor.setDataSource(context,uri,null);
             int track=-1;MediaFormat format=null;

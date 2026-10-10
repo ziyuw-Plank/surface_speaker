@@ -40,14 +40,14 @@ final class RootFifoTester {
         if(frequency<100||frequency>300||strength<1||strength>56)return "DISABLED: tone limits";
         return execute(context,"long-tone "+frequency+" "+strength,null);
     }
-    static String localPreview(Context context,Uri uri,int strength,int gain,int detail){
+    static String localPreview(Context context,Uri uri,int strength,int gain,int detail,int bassClean,int trebleStable){
         if(!deviceCandidate())return "DISABLED: Xiaomi shennong arm64 only";
         if(uri==null)return "ERROR: select an audio file first";
         if(strength<1||strength>56)return "ERROR: media volume muted or invalid output limit";
         if(!busy.compareAndSet(false,true))return "ERROR: native test already running";
         LocalPcmPreview.Clip clip=null;
         try {
-            clip=LocalPcmPreview.decode(context,uri,gain,detail);
+            clip=LocalPcmPreview.decode(context,uri,gain,detail,bassClean,trebleStable);
             return runPrivileged(context,"play-file",strength,clip.file);
         }catch(Exception e){return "ERROR:decode/preview "+e.getClass().getSimpleName()+": "+e.getMessage();}
         finally{if(clip!=null)clip.file.delete();busy.set(false);}
@@ -57,12 +57,13 @@ final class RootFifoTester {
         try{return runPrivileged(context,args,0,pcm);}
         finally{busy.set(false);}
     }
-    /** 60 ms live frames, single-slot newest-frame queue, native completion acknowledgement.
+    /** Selectable 48/60/96 ms FF_CUSTOM blocks, single-slot newest-frame queue, native acknowledgement.
      * A full queue drops outdated PCM rather than allowing hidden pipe buffering to drift.
      * FF_CUSTOM is still discrete; low latency != gapless or phase synchronized. */
     static final class LiveSession implements AutoCloseable {
-        static final int LIVE_SAMPLES=1440; // 60 ms at 24 kHz
-        static final int STALE_MS=120;
+        static final int DEFAULT_SAMPLES=1152; // 48 ms at 24kHz
+        private final int frameSamples;
+        private final int staleMs;
         private static final class Frame {
             final byte[] pcm;final int strength;final long received;
             Frame(byte[] pcm,int strength){this.pcm=pcm;this.strength=strength;received=android.os.SystemClock.uptimeMillis();}
@@ -78,18 +79,24 @@ final class RootFifoTester {
         private final CountDownLatch ready=new CountDownLatch(1);
         private volatile boolean readyOk;
         private volatile int frames,dropped;
+        private volatile int nativeDurationMs;
         private volatile String writerError="";
         private int acknowledged;
         private final Thread writer;
-        LiveSession(Process p,File f,File m){
+        LiveSession(Process p,File f,File m,int samples){
             process=p;out=p.getOutputStream();temp=f;marker=m;
+            frameSamples=samples;staleMs=Math.max(75,(samples/24)*2);
             new Thread(()->{
                 try(BufferedReader reader=new BufferedReader(new InputStreamReader(p.getInputStream(),StandardCharsets.UTF_8))){
                     String line;
                     while((line=reader.readLine())!=null){
                         recentLog=line;
                         if(line.startsWith("READY:")){readyOk=true;ready.countDown();}
-                        if(line.startsWith("NEXT:")){synchronized(ackLock){acknowledged++;ackLock.notifyAll();}}
+                        if(line.startsWith("NEXT:")){
+                            String[] items=line.split(":");
+                            if(items.length>=3)try{nativeDurationMs=Integer.parseInt(items[2]);}catch(NumberFormatException ignored){}
+                            synchronized(ackLock){acknowledged++;ackLock.notifyAll();}
+                        }
                         if(line.startsWith("ERROR:")){ready.countDown();}
                     }
                 }catch(Exception e){recentLog="Root output: "+e.getMessage();}
@@ -102,7 +109,7 @@ final class RootFifoTester {
         void writeFrame(byte[] audio,int strength){
             if(closed.get()||!process.isAlive()||!writerError.isEmpty())
                 throw new IllegalStateException("Native FIFO exited: "+recentLog+" "+writerError);
-            if(audio.length!=LIVE_SAMPLES)throw new IllegalArgumentException("Expected 60ms PCM frame");
+            if(audio.length!=frameSamples)throw new IllegalArgumentException("Expected "+frameSamples+" PCM samples");
             Frame frame=new Frame(audio,Math.max(0,Math.min(56,strength)));
             if(!queue.offer(frame)){queue.poll();dropped++;if(!queue.offer(frame))dropped++;}
         }
@@ -112,7 +119,7 @@ final class RootFifoTester {
                 while(!closed.get()&&process.isAlive()){
                     Frame frame=queue.poll(120,TimeUnit.MILLISECONDS);
                     if(frame==null)continue;
-                    if(android.os.SystemClock.uptimeMillis()-frame.received>STALE_MS){dropped++;continue;}
+                    if(android.os.SystemClock.uptimeMillis()-frame.received>staleMs){dropped++;continue;}
                     out.write(frame.strength);out.write(frame.pcm);out.flush();sent++;
                     long until=android.os.SystemClock.uptimeMillis()+1200;
                     synchronized(ackLock){
@@ -129,6 +136,7 @@ final class RootFifoTester {
         }
         int frames(){return frames;}
         int dropped(){return dropped;}
+        int nativeDurationMs(){return nativeDurationMs;}
         String recentLog(){return writerError.isEmpty()?recentLog:writerError;}
         boolean alive(){return !closed.get()&&process.isAlive()&&writerError.isEmpty()&&writer.isAlive();}
         @Override public void close(){
@@ -142,7 +150,8 @@ final class RootFifoTester {
             marker.delete();temp.delete();busy.set(false);
         }
     }
-    static LiveSession openLive(Context context)throws Exception {
+    static LiveSession openLive(Context context,int frameSamples)throws Exception {
+        if(frameSamples!=1152 && frameSamples!=1440 && frameSamples!=2304)throw new IllegalArgumentException("Unsupported frame samples");
         if(!deviceCandidate())throw new IllegalStateException("Native FIFO only enabled on shennong arm64");
         if(!busy.compareAndSet(false,true))throw new IllegalStateException("Another native FIFO test is active");
         File source=new File(context.getCacheDir(),"surface_fifo_stream_"+System.nanoTime());
@@ -154,10 +163,10 @@ final class RootFifoTester {
             String workdir="/data/local/tmp/ssfifo-stream-"+Long.toHexString(System.nanoTime());
             String executable=workdir+"/fifo";
             String inner="mkdir -m 0700 "+quote(workdir)+" || exit 6; cp "+quote(source.getAbsolutePath())+" "+quote(executable)
-                +" && chmod 0700 "+quote(executable)+" && "+quote(executable)+" live-stdin "+quote(marker.getAbsolutePath())
+                +" && chmod 0700 "+quote(executable)+" && "+quote(executable)+" live-stdin "+quote(marker.getAbsolutePath())+" "+frameSamples
                 +"; ret=$?; rm -f "+quote(executable)+"; rmdir "+quote(workdir)+"; exit $ret";
             Process proc=new ProcessBuilder("/system/bin/sh","-c","su -c "+quote(inner)).redirectErrorStream(true).start();
-            LiveSession session=new LiveSession(proc,source,marker);
+            LiveSession session=new LiveSession(proc,source,marker,frameSamples);
             if(!session.awaitReady()) {String log=session.recentLog();session.close();throw new IllegalStateException("Root FIFO could not start: "+log);}
             return session;
         }catch(Exception e){source.delete();marker.delete();busy.set(false);throw e;}

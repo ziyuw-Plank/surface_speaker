@@ -20,11 +20,11 @@ final class HapticEngine {
         String vendorName;
     }
     static final class Tune {
-        int gain = 58, bass=68, detail=65, gate=6, smoothing=45, pulse=60, frequency=130, speaker=55;
+        int gain = 58, bass=68, detail=65, bassClean=52, trebleStable=60, liveFrameMs=48, gate=6, smoothing=45, pulse=60, frequency=130, speaker=55;
         boolean followVolume=true;
         boolean fifoBoost=false; // Opt-in experimental output tier; never alters Vmax or sysfs.
         int volumeRatio=65; // percentage of the app's capped haptic output
-        Tune copy() {Tune t=new Tune();t.gain=gain;t.bass=bass;t.detail=detail;t.gate=gate;t.smoothing=smoothing;t.pulse=pulse;t.frequency=frequency;t.speaker=speaker;t.followVolume=followVolume;t.volumeRatio=volumeRatio;t.fifoBoost=fifoBoost;return t;}
+        Tune copy() {Tune t=new Tune();t.gain=gain;t.bass=bass;t.detail=detail;t.bassClean=bassClean;t.trebleStable=trebleStable;t.liveFrameMs=liveFrameMs;t.gate=gate;t.smoothing=smoothing;t.pulse=pulse;t.frequency=frequency;t.speaker=speaker;t.followVolume=followVolume;t.volumeRatio=volumeRatio;t.fifoBoost=fifoBoost;return t;}
     }
     static Tune preset(int i) {
         Tune t=new Tune();

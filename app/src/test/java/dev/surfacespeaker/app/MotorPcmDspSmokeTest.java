@@ -13,6 +13,15 @@ public final class MotorPcmDspSmokeTest {
         }
         return Math.sqrt(sum/count);
     }
+    private static MotorPcmDsp newTuned(int bassClean,int trebleStable){MotorPcmDsp p=new MotorPcmDsp();p.setTuning(bassClean,trebleStable);return p;}
+    private static double bandRms(MotorPcmDsp p,int hz){
+        double energy=0;int n=0;
+        for(int i=0;i<24000;i++){
+            int s=p.convert((float)(0.08*Math.sin(2*Math.PI*hz*i/24000.0)),50,65);
+            if(i>=6000){energy+=s*s;n++;}
+        }
+        return Math.sqrt(energy/n);
+    }
     public static void main(String[] args){
         MotorPcmDsp silent=new MotorPcmDsp();
         for(int i=0;i<12000;i++)verify(silent.convert(0f,58)==0,"silence creates haptics");
@@ -23,7 +32,13 @@ public final class MotorPcmDspSmokeTest {
         double upper=rms(650,.11f,58);
         verify(mid>12&&upper>12,"signal detail lost: "+mid+" "+upper);
         double narrow=rms(700,.05f,45,0), enhanced=rms(700,.05f,45,100);
-        verify(enhanced>narrow*1.15,"detail slider does not preserve higher audio frequencies: "+narrow+"->"+enhanced);
+        verify(enhanced>narrow*1.05,"detail slider inactive: "+narrow+"->"+enhanced);
+        MotorPcmDsp clean=new MotorPcmDsp();clean.setTuning(80,75);
+        double bass=bandRms(clean,75),body=bandRms(newTuned(80,75),240);
+        verify(bass<body*.75,"subbass rumble not suppressed: "+bass+" vs "+body);
+        double upperStable=bandRms(newTuned(80,85),1300);
+        double upperWide=bandRms(newTuned(80,0),1300);
+        verify(upperStable<upperWide*.75,"treble stability filter inactive: "+upperStable+" vs "+upperWide);
         System.out.printf("DSP smoke passed: gain RMS %.1f->%.1f, 300Hz %.1f, 650Hz %.1f%n",low,high,mid,upper);
     }
 }

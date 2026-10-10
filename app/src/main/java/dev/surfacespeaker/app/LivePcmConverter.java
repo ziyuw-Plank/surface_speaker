@@ -4,14 +4,18 @@ package dev.surfacespeaker.app;
  * Never stores or transmits audio. Blocks are 60 ms, and the kernel side is segmented. */
 final class LivePcmConverter {
     interface Consumer { void accept(byte[] frame)throws Exception; }
-    private final byte[] block=new byte[RootFifoTester.LiveSession.LIVE_SAMPLES];
+    private final byte[] block;
     private int used;
     private long inputSample;
     private double nextOutput;
     private float last;
     private final MotorPcmDsp dsp=new MotorPcmDsp();
     private volatile int gain=58, detail=65;
-    void setTune(int g,int d){gain=Math.max(0,Math.min(100,g));detail=Math.max(0,Math.min(100,d));}
+    LivePcmConverter(int frameSamples){block=new byte[frameSamples];}
+    void setTune(int g,int d,int bassClean,int trebleStable){
+        gain=Math.max(0,Math.min(100,g));detail=Math.max(0,Math.min(100,d));
+        dsp.setTuning(bassClean,trebleStable);
+    }
     void consume(short[] pcm,int count,int rate,Consumer consumer)throws Exception {
         for(int i=0;i<count;i++){
             float x=pcm[i]/32768f;

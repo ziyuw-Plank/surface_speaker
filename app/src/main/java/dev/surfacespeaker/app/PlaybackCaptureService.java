@@ -34,6 +34,8 @@ public final class PlaybackCaptureService extends Service {
     static volatile String routeMessage="Idle";
     static volatile int nativeBlocks;
     static volatile int nativeDropped;
+    static volatile int nativeProcessingMs;
+    static volatile int activeFrameMs;
     static void setNativeRoute(boolean requested){preferNativeFifo=requested;}
 
     private static volatile HapticEngine.Tune settings=HapticEngine.preset(0);
@@ -102,13 +104,16 @@ public final class PlaybackCaptureService extends Service {
     private void captureLoop(int sampleRate){
         AudioAnalysis fft=new AudioAnalysis();short[] pcm=new short[512];long lastUi=0;
         final boolean nativeMode=preferNativeFifo && RootFifoTester.deviceCandidate();
-        final LivePcmConverter converter=nativeMode?new LivePcmConverter():null;
-        nativeBlocks=0;nativeDropped=0;
+        // 48ms response (more restarts), 60ms balanced, 96ms smoother (more latency).
+        final int frameMs=settings.liveFrameMs==96?96:settings.liveFrameMs==60?60:48;
+        final int frameSamples=frameMs*24;
+        final LivePcmConverter converter=nativeMode?new LivePcmConverter(frameSamples):null;
+        nativeBlocks=0;nativeDropped=0;nativeProcessingMs=0;activeFrameMs=frameMs;
         if(nativeMode){
             try{
-                liveSession=RootFifoTester.openLive(this);
+                liveSession=RootFifoTester.openLive(this,frameSamples);
                 motor.setEnabled(false);
-                routeMessage="Native FIFO low-latency 60ms frames; FF_CUSTOM may still have seams";
+                routeMessage="Native FIFO "+frameMs+"ms chunks; FF_CUSTOM restarts between effects";
                 state(routeMessage,true);
             }catch(Exception e){
                 routeMessage="Native FIFO unavailable: "+e.getMessage();
@@ -122,11 +127,10 @@ public final class PlaybackCaptureService extends Service {
             try {count=recorder.read(pcm,0,pcm.length,AudioRecord.READ_BLOCKING);}catch(Exception e){stopError="Audio read error: "+e.getMessage();break;}
             if(count<0){stopError="Audio read returned error "+count;break;}
             if(count<128)continue;
-            AudioAnalysis.Frame frame=fft.analyze(pcm,count,sampleRate);
-            if(frame.rms<0.006f)silent++;else silent=0;
+
             if(nativeMode){
                 try{
-                    converter.setTune(settings.gain,settings.detail);
+                    converter.setTune(settings.gain,settings.detail,settings.bassClean,settings.trebleStable);
                     converter.consume(pcm,count,sampleRate,frameData->{
                         RootFifoTester.LiveSession session=liveSession;
                         if(session==null)throw new IllegalStateException("Native root stream stopped");
@@ -138,18 +142,21 @@ public final class PlaybackCaptureService extends Service {
                         int peak=0;for(byte sample:frameData)peak=Math.max(peak,Math.abs((int)sample));
                         if(peak<3)strength=0;
                         session.writeFrame(frameData,strength);
-                        nativeBlocks=session.frames();nativeDropped=session.dropped();
+                        nativeBlocks=session.frames();nativeDropped=session.dropped();nativeProcessingMs=session.nativeDurationMs();
                         if(!session.alive())throw new IllegalStateException(session.recentLog());
                     });
                 }catch(Exception e){routeMessage="Native FIFO streaming error: "+e.getMessage();stopError=routeMessage;break;}
             }else motor.onPcm(pcm,count,sampleRate,settings);
             long now=android.os.SystemClock.uptimeMillis();
-            if(now-lastUi>65){
+            if(now-lastUi>85){
                 lastUi=now;
+                // FFT is visual feedback only; do not run it for every 10.7ms audio chunk.
+                AudioAnalysis.Frame frame=fft.analyze(pcm,count,sampleRate);
+                if(frame.rms<0.006f)silent++;else silent=0;
                 int pulses=nativeMode?nativeBlocks:motor.pulseCount();
                 handler.post(()->{Listener l=listener;if(l!=null)l.onCaptureFrame(frame,pulses);});
+                if(silent==40)state("No capturable audio detected: app may block capture",true);
             }
-            if(silent==300)state("No capturable audio detected: app may block capture",true);
         }
         if(active.get()){shutdown();stopSelf();}
     }

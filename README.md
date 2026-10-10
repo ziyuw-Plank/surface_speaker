@@ -1,16 +1,18 @@
-# SurfaceSpeaker v0.12 — Persistent live FIFO & waveform detail
+# SurfaceSpeaker v0.13 — lower-lag / cleaner native FIFO (experimental)
 
-## Fixed: Capture ended automatically
+Built for Xiaomi 14 Pro / `shennong` with KernelSU on Android 16. Outputs to the existing root-only Qualcomm `FF_CUSTOM` FIFO helper.
 
-The previous native live capture forcibly exited after **1,000 × 60 ms = 60 seconds**, and imposed a **one-second silence every 250 frames (15 seconds)**. Both prototype limits have been removed. Live capture continues until the user stops, Android revokes MediaProjection, or the audio/driver process fails. No scheduled silence is inserted. For long, loud playback, a conservative sustained-signal estimate can progressively reduce the requested magnitude; this is **not hardware temperature sensing**. Stop if the device heats up or sounds abnormal.
+## What changed
 
-## Improved FIFO fidelity
+- Adjustable **48 ms (Fast, default), 60 ms (Balanced) and 96 ms (Smoother)** FF_CUSTOM block length. This changes the *input accumulation time*, **not** measured end-to-end latency. A shorter frame may cause more noticeable mechanical restarts; the smoother setting may reduce tremor at the cost of lag. Settings take effect on the next capture.
+- New **low-frequency rumble suppression** and **high-frequency stability** tuning controls. Stateful double high-pass and tuneable low-pass replace the previous extra-wide 52-1250 Hz profile. Default filters are conservative until the LRA frequency response can be measured.
+- Less aggressive slow AGC with smoothly limited peaks, aimed at reducing low-tone crackle and high-tone pumping. Native signal amplitude safety ceiling remains unchanged; boost is still opt-in.
+- Capture FFT visualization now runs only about once every 85 ms, avoiding redundant CPU work in the hot audio thread.
+- The native session reports per-segment processing time (measured in the helper, not measured mechanical or end-to-end audio latency). Maximum backlog remains one frame; late frames are discarded.
+- No automatic capture duration limits, no periodic one-second pauses.
 
-- Removed repeated 0.75-ms fade-to-zero from both ends of *every* 60-ms live segment; preserve PCM sample/phase continuity at the application boundary. The driver still uses discrete FF_CUSTOM effects, so hardware restart gaps can remain.
-- Stateful DSP now has a wider roughly **52–1250 Hz** signal band and an adjustable **FIFO waveform detail** spectral shelf. The physical LRA may not reproduce the full frequency range. Gain/limiting and 8-bit dither remain capped.
-- Same detail setting applies to live capture and four-second local PCM preview.
-- Native failures are surfaced in the status message instead of overwritten by a generic "Capture stopped" event.
+## Technical limits
 
-## Constraints
+Android MediaProjection captures only eligible application playback. `FF_CUSTOM` still uploads **separate effects** and the Qualcomm driver restarts at each block. This update does **not** make the input FIFO appendable, achieve phase-synchronous speaker audio, or guarantee an imperceptible delay. Its 8-bit PCM path and unmeasured motor resonance remain hard fidelity limits.
 
-On Xiaomi shennong arm64 only, with KernelSU/root; Android MediaProjection consent required for third-party audio. This is not an unlocked driver or guaranteed gapless PCM streamer. No changes to Vmax, SELinux, AVB, system partition, or vendor files. Safety relies on conservative signal limits and the device's existing firmware protections, **not measured motor temperature/power**. Do not run loud continuous output unattended. CI tests DSP/code compilation, not actual vibration response.
+Never override Vmax, SELinux, protected partitions or driver protection. Avoid prolonged high-strength output or unattended use; stop immediately if overheating or abnormal sound occurs. GitHub Actions validates JVM DSP tests and APK builds, not the motor's acoustic properties.

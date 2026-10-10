@@ -64,7 +64,7 @@ static int open_verified(char *path,size_t cap) {
 /* One upload drives one long FIFO effect; the kernel refills its 2048-byte FIFO via IRQ.
  * Never repeatedly submit short FF events to simulate audio. */
 static int play_fifo(int fd, const char *path, uint8_t *data, int samples, int strength){
-    if(samples<1200 || samples>96000 || strength<1 || strength>56){
+    if(samples<960 || samples>96000 || strength<1 || strength>56){
         fprintf(stderr,"ERROR: unsupported FIFO samples=%d strength=%d\n",samples,strength);
         return 2;
     }
@@ -118,15 +118,17 @@ int main(int argc,char **argv){
     signal(SIGINT,on_signal);signal(SIGTERM,on_signal);
     char path[64];int fd=open_verified(path,sizeof(path));if(fd<0)return 3;
     if(!strcmp(argv[1],"live-stdin")){
-        /* EXPERIMENTAL: raw stdin transport, NOT an appendable kernel FIFO. Each
-         * 60ms FF_CUSTOM segment is a separate effect, with possible gaps. */
-        if(argc!=3){fprintf(stderr,"ERROR:live-stdin requires stop marker path\n");close(fd);return 2;}
+        /* Each segment remains a separate FF_CUSTOM effect. No seamless kernel append. */
+        if(argc!=4){fprintf(stderr,"ERROR:live-stdin requires stop marker and frame sample count\n");close(fd);return 2;}
         stop_marker=argv[2];
-        const int NSAMPLES=1440; // 60 ms (24 kHz)
+        int NSAMPLES=atoi(argv[3]);
+        if(NSAMPLES!=1152 && NSAMPLES!=1440 && NSAMPLES!=2304){
+            fprintf(stderr,"ERROR:invalid FIFO block size\n");close(fd);return 2;
+        }
         uint8_t *pcm=malloc(NSAMPLES);if(!pcm){close(fd);return 3;}
         live_mode=1;
         setvbuf(stdout,NULL,_IOLBF,0);
-        printf("READY: persistent native FIFO session, 60ms discrete FF_CUSTOM segments; not gapless\n");
+        printf("READY: persistent FIFO %dms segments; FF_CUSTOM is not gapless\n",NSAMPLES/24);
         unsigned long long chunks=0;
         int failures=0;
         float sustainedLoad=0.0f; // Energy budget proxy. Not a real motor temperature sensor.
@@ -154,10 +156,13 @@ int main(int argc,char **argv){
                     warnedDerating=1;
                 }
             } else warnedDerating=0;
-            if(permitted==0){sleep_ms(60);}
+            struct timespec ts0,ts1;clock_gettime(CLOCK_MONOTONIC,&ts0);
+            if(permitted==0){sleep_ms(NSAMPLES/24);}
             else {int rc=play_fifo(fd,"live",pcm,NSAMPLES,permitted);if(rc){failures++;break;}}
+            clock_gettime(CLOCK_MONOTONIC,&ts1);
+            long elapsed=(ts1.tv_sec-ts0.tv_sec)*1000L+(ts1.tv_nsec-ts0.tv_nsec)/1000000L;
             chunks++;
-            printf("NEXT:%llu\n",chunks); // ACK; Java never queues more than one future frame
+            printf("NEXT:%llu:%ld\n",chunks,elapsed); // elapsed native processing time, NOT acoustic latency
             if(chunks%250==0){fprintf(stderr,"STATUS: live blocks=%llu, user-controlled persistent capture; FF_CUSTOM remains segmented\n",chunks);}
         }
         fprintf(stderr,"DONE:live blocks=%llu errors=%d\n",chunks,failures);
