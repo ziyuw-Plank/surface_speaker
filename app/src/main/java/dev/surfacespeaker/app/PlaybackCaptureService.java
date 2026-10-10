@@ -100,7 +100,7 @@ public final class PlaybackCaptureService extends Service {
             if(count<256)continue;
             AudioAnalysis.Frame frame=fft.analyze(pcm,count,sampleRate);
             if(frame.rms<0.006f)silent++;else silent=0;
-            motor.onAudio(frame.rms,frame.bass,settings,false);
+            motor.onPcm(pcm,count,sampleRate,settings);
             long now=android.os.SystemClock.uptimeMillis();
             if(now-lastUi>65){
                 lastUi=now;

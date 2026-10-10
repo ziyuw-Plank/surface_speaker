@@ -19,13 +19,13 @@ final class HapticEngine {
         String vendorName;
     }
     static final class Tune {
-        int gain = 62, bass=68, gate=6, smoothing=35, pulse=48, frequency=130, speaker=55;
+        int gain = 58, bass=68, gate=6, smoothing=45, pulse=60, frequency=130, speaker=55;
         Tune copy() {Tune t=new Tune();t.gain=gain;t.bass=bass;t.gate=gate;t.smoothing=smoothing;t.pulse=pulse;t.frequency=frequency;t.speaker=speaker;return t;}
     }
     static Tune preset(int i) {
         Tune t=new Tune();
-        if(i==1){t.gain=68;t.bass=86;t.gate=5;t.smoothing=42;t.pulse=55;}
-        if(i==2){t.gain=54;t.bass=40;t.gate=5;t.smoothing=20;t.pulse=35;}
+        if(i==1){t.gain=62;t.bass=85;t.gate=5;t.smoothing=45;t.pulse=60;}
+        if(i==2){t.gain=48;t.bass=38;t.gate=5;t.smoothing=20;t.pulse=40;}
         return t;
     }
     final Vibrator motor;
@@ -36,6 +36,13 @@ final class HapticEngine {
     int pulseCount(){return outputPulses;}
     String lastError(){return lastOutputError;}
     private float smooth;
+    // A band-limited audio envelope, sampled at ~100 Hz; this is NOT raw PCM motor drive.
+    private float previousInput, highpass, lowpass, envelopeLevel;
+    private double segmentEnergy;
+    private int segmentCount, envelopeCount;
+    private final long[] envelopeDurations = new long[8];
+    private final int[] envelopeAmplitudes = new int[8];
+    private long rollingStartMs;
     private boolean enabled;
     HapticEngine(Context context) {
         Vibrator m=null;
@@ -63,7 +70,70 @@ final class HapticEngine {
     }
     void setEnabled(boolean enabled){this.enabled=enabled;if(!enabled)stop();}
     boolean isEnabled(){return enabled;}
-    void stop(){if(motor!=null) try{motor.cancel();}catch(Exception ignored){} smooth=0;lastPulse=0;totalMotionSince=0;}
+    void stop(){if(motor!=null) try{motor.cancel();}catch(Exception ignored){} smooth=0;lastPulse=0;totalMotionSince=0;resetEnvelope();}
+    private void resetEnvelope() {
+        previousInput=highpass=lowpass=envelopeLevel=0f;
+        segmentEnergy=0;
+        segmentCount=envelopeCount=0;
+        rollingStartMs=0;
+    }
+    /** Converts allowed playback PCM to 10 ms amplitude envelopes in the 35-300 Hz range.
+      * Batched waveform updates prevent the old 95 ms one-shot pulse train.
+      * This follows intensity dynamics, NOT pitch or a broadband audio waveform.
+      */
+    synchronized void onPcm(short[] samples, int count, int sampleRate, Tune t) {
+        if(!enabled || !features.present || !features.amplitude || sampleRate<4000 || count<=0)return;
+        final float hpCoeff=(float)Math.exp(-2*Math.PI*36.0/sampleRate);
+        final float lpAlpha=1f-(float)Math.exp(-2*Math.PI*290.0/sampleRate);
+        final int perSegment=Math.max(48, sampleRate/100);
+        for(int i=0;i<count;i++) {
+            float x=samples[i]/32768f;
+            highpass=hpCoeff*(highpass+x-previousInput);
+            previousInput=x;
+            lowpass += lpAlpha*(highpass-lowpass);
+            float band=(float)(lowpass*(0.55+0.45*t.bass/100.0));
+            segmentEnergy+=band*band;
+            if(++segmentCount>=perSegment){
+                double rms=Math.sqrt(segmentEnergy/segmentCount);
+                segmentEnergy=0;segmentCount=0;
+                float threshold=0.0025f + t.gate/70f*0.035f;
+                float target=(float)Math.max(0, rms-threshold);
+                target=(float)Math.min(0.80, Math.sqrt(target)*(0.88+1.7*t.gain/100f));
+                // High attack, tunable release keeps connected notes without exaggerated 'thumps'.
+                float attack=0.48f-t.smoothing/100f*0.18f;
+                float release=0.30f-t.smoothing/100f*0.23f;
+                envelopeLevel+=(target-envelopeLevel)*(target>envelopeLevel?attack:release);
+                int amp=(int)Math.min(170, Math.max(0, Math.round(185f*envelopeLevel)));
+                if(amp<13)amp=0;
+                int slot=envelopeCount++;
+                envelopeDurations[slot]=Math.max(5,Math.round(segmentCountDuration(perSegment,sampleRate)));
+                envelopeAmplitudes[slot]=amp;
+                if(envelopeCount>=Math.max(4,Math.min(8,Math.round(t.pulse/10f))))flushEnvelope();
+            }
+        }
+    }
+    private static float segmentCountDuration(int samples,int sampleRate){return 1000f*samples/sampleRate;}
+    private void flushEnvelope(){
+        if(envelopeCount==0)return;
+        long now=SystemClock.uptimeMillis();
+        if(rollingStartMs==0)rollingStartMs=now;
+        if(now-rollingStartMs>8_000){
+            if(now-rollingStartMs<8_350){envelopeCount=0;return;}
+            rollingStartMs=now;
+        }
+        int max=0;
+        for(int j=0;j<envelopeCount;j++)max=Math.max(max,envelopeAmplitudes[j]);
+        if(max<13){envelopeCount=0;return;}
+        try{
+            long[] times=new long[envelopeCount];
+            int[] amps=new int[envelopeCount];
+            System.arraycopy(envelopeDurations,0,times,0,envelopeCount);
+            System.arraycopy(envelopeAmplitudes,0,amps,0,envelopeCount);
+            motor.vibrate(VibrationEffect.createWaveform(times,amps,-1));
+            outputPulses++;lastOutputError="";
+        }catch(RuntimeException err){lastOutputError=err.getClass().getSimpleName()+": "+err.getMessage();}
+        envelopeCount=0;
+    }
     void onAudio(float rms,float bass,Tune t, boolean envelopeEnabled) {
         if(!enabled||!features.present)return;
         long now=SystemClock.uptimeMillis();

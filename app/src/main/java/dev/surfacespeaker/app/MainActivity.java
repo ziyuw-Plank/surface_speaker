@@ -57,6 +57,7 @@ public final class MainActivity extends Activity {
     private int preset=0;
     private TextView message, trackLabel, statusLabel, presetLabel, authorization, inputStatus, motorStatus, captureStatus;
     private Button captureButton;
+    private boolean requestingCapture=false;
     private final ScrollView[] sections=new ScrollView[4];
     private final Button[] dock=new Button[4];
     private Button playButton, envelopeButton, nativeButton, shizukuButton;
@@ -93,7 +94,7 @@ public final class MainActivity extends Activity {
         if(preset==3){
             tune.gain=p.getInt("gain",32);tune.bass=p.getInt("bass",55);
             tune.gate=p.getInt("gate",20);tune.smoothing=p.getInt("smooth",55);
-            tune.pulse=p.getInt("pulse",35);tune.frequency=p.getInt("freq",130);
+            tune.pulse=Math.max(40,p.getInt("pulse",60));tune.frequency=p.getInt("freq",130);
             tune.speaker=p.getInt("speaker",35);
         }
         useEnvelope=p.getBoolean("envelope",true);
@@ -136,7 +137,7 @@ public final class MainActivity extends Activity {
         LinearLayout top=row();top.setPadding(d(20),d(15),d(20),d(8));
         TextView brand=text("S / S",18,ACCENT,true);brand.setLetterSpacing(.18f);top.addView(brand);
         TextView heading=text("  SURFACE SPEAKER",17,TEXT,true);top.addView(heading);
-        TextView version=text("  v0.4",11,MUTED,false);top.addView(version);
+        TextView version=text("  v0.5",11,MUTED,false);top.addView(version);
         shell.addView(top,lp(-1,54));
         FrameLayout frame=new FrameLayout(this);shell.addView(frame,new LinearLayout.LayoutParams(-1,0,1));
         for(int i=0;i<4;i++){
@@ -151,9 +152,9 @@ public final class MainActivity extends Activity {
                 statusLabel=text(t("等待音频信号","Waiting for audio"),12,ACCENT,false);
                 statusLabel.setGravity(Gravity.CENTER);page.addView(statusLabel);
                 LinearLayout live=card(page);
-                header(live,t("实时音乐","LIVE AUDIO"),t("捕获其他应用允许共享的媒体声音 · 需要系统授权","Capture permitted audio from other apps · Android consent required"));
+                header(live,t("实时音乐","LIVE AUDIO"),t("Android 将音频捕获放在屏幕共享授权下；本应用不会采集屏幕画面","Android asks screen-sharing permission for audio; no screen video is recorded"));
                 captureButton=button(t("开始实时捕获","Start live capture"));live.addView(captureButton,lp(-1,52));
-                captureButton.setOnClickListener(v->{if(PlaybackCaptureService.running)stopCapture();else startCapture();});
+                captureButton.setOnClickListener(v->{if(PlaybackCaptureService.running)stopCapture();else if(!requestingCapture)startCapture();});
                 captureStatus=text(t("未激活","Inactive"),13,MUTED,false);
                 captureStatus.setPadding(0,d(10),0,d(2));live.addView(captureStatus);
                 inputStatus=text(t("输入音频：无","Audio input: none"),12,MUTED,false);live.addView(inputStatus);
@@ -196,7 +197,7 @@ public final class MainActivity extends Activity {
                 slider(adjust,t("低频权重","Bass weighting"),0,100,tune.bass,false,v->tune.bass=v);
                 slider(adjust,t("触发阈值","Noise gate"),0,70,tune.gate,false,v->tune.gate=v);
                 slider(adjust,t("平滑","Smoothing"),0,100,tune.smoothing,false,v->tune.smoothing=v);
-                slider(adjust,t("脉冲宽度 ms","Pulse duration ms"),25,65,tune.pulse,false,v->tune.pulse=v);
+                slider(adjust,t("振动包络刷新窗口 ms","Envelope update window ms"),40,80,tune.pulse,false,v->tune.pulse=v);
                 slider(adjust,t("马达频率 Hz","Motor frequency Hz"),
                    engine.features.envelope?(int)Math.ceil(engine.features.minHz):40,
                    engine.features.envelope?(int)Math.floor(engine.features.maxHz):500,
@@ -245,7 +246,8 @@ public final class MainActivity extends Activity {
         }
     }
     private void startCapture(){
-        if(!engine.features.present){notifyStatus(t("马达不可用","Vibrator unavailable"));return;}
+        requestingCapture=true;updateDashboard();
+        if(!engine.features.present){requestingCapture=false;updateDashboard();notifyStatus(t("马达不可用","Vibrator unavailable"));return;}
         if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){
             pendingCapture=true;requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},REQUEST_RECORD);return;
         }
@@ -253,14 +255,27 @@ public final class MainActivity extends Activity {
             MediaProjectionManager mgr=(MediaProjectionManager)getSystemService(Context.MEDIA_PROJECTION_SERVICE);
             startActivityForResult(mgr.createScreenCaptureIntent(),REQUEST_CAPTURE);
             notifyStatus(t("请允许系统音频捕获","Allow audio capture in Android dialog"));
-        }catch(Exception e){notifyStatus(t("音频捕获授权失败：","Capture consent failed: ")+e.getMessage());}
+        }catch(Exception e){requestingCapture=false;updateDashboard();notifyStatus(t("音频捕获授权失败：","Capture consent failed: ")+e.getMessage());}
     }
-    private void stopCapture(){stopService(new Intent(this,PlaybackCaptureService.class));
-        PlaybackCaptureService.running=false;updateCapabilityButtons();spectrum.setPlaying(false);
+    private void stopCapture(){startService(new Intent(this,PlaybackCaptureService.class).setAction(PlaybackCaptureService.STOP));
+        requestingCapture=false;updateCapabilityButtons();spectrum.setPlaying(false);
         notifyStatus(t("实时捕获停止","Live capture stopped"));}
     private void updateDashboard(){
-        if(captureButton!=null)captureButton.setText(PlaybackCaptureService.running?t("停止实时捕获","Stop live capture"):t("开始实时捕获","Start live capture"));
-        if(captureStatus!=null)captureStatus.setText(PlaybackCaptureService.running?t("实时捕获正在运行","Live capture active"):t("实时捕获未激活","Live capture inactive"));
+        boolean live=PlaybackCaptureService.running;
+        if(captureButton!=null){
+            captureButton.setText(live?t("● 捕获中 · 点击停止","● Capturing · Tap to stop")
+                :requestingCapture?t("等待系统授权…","Waiting for permission…")
+                :t("开始实时捕获","Start live capture"));
+            captureButton.setBackground(background(live?0xff357c62:requestingCapture?0xff8e9967:ACCENT,14));
+            captureButton.setTextColor(live?Color.WHITE:BACK);
+            captureButton.setAlpha(requestingCapture && !live?0.72f:1f);
+        }
+        if(captureStatus!=null){
+            captureStatus.setText(live?t("● 正在分析系统播放音频","● Capturing playback audio")
+                :requestingCapture?t("等待音频权限与系统同意","Waiting for system consent")
+                :t("实时捕获未激活","Live capture inactive"));
+            captureStatus.setTextColor(live?ACCENT:MUTED);
+        }
         if(authorization!=null){
             boolean sh=false;try{sh=Shizuku.pingBinder()&&Shizuku.checkSelfPermission()==PackageManager.PERMISSION_GRANTED;}catch(Throwable ignored){}
             authorization.setText(t("马达：","Vibrator: ")+(engine.features.present?t("可用","available"):t("不可用","unavailable"))+
@@ -397,7 +412,7 @@ public final class MainActivity extends Activity {
     private void exportReport(){
         Intent i=new Intent(Intent.ACTION_CREATE_DOCUMENT);
         i.addCategory(Intent.CATEGORY_OPENABLE);i.setType("text/plain");
-        i.putExtra(Intent.EXTRA_TITLE,"surface-speaker-v0.3-diagnostics.txt");
+        i.putExtra(Intent.EXTRA_TITLE,"surface-speaker-v0.5-diagnostics.txt");
         startActivityForResult(i,REQUEST_EXPORT);
     }
     private void openFile(){
@@ -409,14 +424,14 @@ public final class MainActivity extends Activity {
     @Override protected void onActivityResult(int req,int result,Intent data){
         super.onActivityResult(req,result,data);
         if(req==REQUEST_CAPTURE){
-            if(result!=RESULT_OK || data==null){notifyStatus(t("用户取消实时音频授权","Live audio consent cancelled"));return;}
+            if(result!=RESULT_OK || data==null){requestingCapture=false;updateDashboard();notifyStatus(t("用户取消实时音频授权","Live audio consent cancelled"));return;}
             stop(); // local player only; background capture remains independent
             try{
                 Intent service=new Intent(this,PlaybackCaptureService.class).setAction(PlaybackCaptureService.START)
                     .putExtra(PlaybackCaptureService.CODE,result).putExtra(PlaybackCaptureService.DATA,data);
                 startForegroundService(service);
                 captureStatus.setText(t("正在启动实时捕获…","Starting live capture…"));
-            }catch(Exception e){notifyStatus(t("服务启动失败：","Capture service failed: ")+e.getMessage());}
+            }catch(Exception e){requestingCapture=false;updateDashboard();notifyStatus(t("服务启动失败：","Capture service failed: ")+e.getMessage());}
             return;
         }
         if(result!=RESULT_OK || data==null || data.getData()==null){
@@ -462,7 +477,7 @@ public final class MainActivity extends Activity {
         super.onRequestPermissionsResult(code,permissions,results);
         if(code==REQUEST_RECORD){
             boolean granted=results.length>0&&results[0]==PackageManager.PERMISSION_GRANTED;
-            if(pendingCapture){pendingCapture=false;if(granted)startCapture();else notifyStatus(t("实时音频捕获需要录音权限","Capture needs audio permission"));}
+            if(pendingCapture){pendingCapture=false;if(granted)startCapture();else {requestingCapture=false;notifyStatus(t("实时音频捕获需要录音权限","Capture needs audio permission"));}}
             else {startPlayback();if(!granted)notifyStatus(t("播放可用，但没有录音权限时不会驱动马达","Player works but haptics need audio permission"));}
             updateDashboard();
         }
@@ -507,7 +522,13 @@ public final class MainActivity extends Activity {
             visualizer.setCaptureSize(cap);
             int hz=Math.min(Visualizer.getMaxCaptureRate(),18000);
             visualizer.setDataCaptureListener(new Visualizer.OnDataCaptureListener(){
-                @Override public void onWaveFormDataCapture(Visualizer v,byte[] waveform,int samplingRate){ }
+                private short[] waveformBuffer=new short[0];
+                @Override public void onWaveFormDataCapture(Visualizer v,byte[] waveform,int samplingRate){
+                    if(waveform==null||waveform.length==0||PlaybackCaptureService.running)return;
+                    if(waveformBuffer.length!=waveform.length)waveformBuffer=new short[waveform.length];
+                    for(int k=0;k<waveform.length;k++) waveformBuffer[k]=(short)(((waveform[k]&0xff)-128)<<8);
+                    if(!nativeActive())engine.onPcm(waveformBuffer,waveformBuffer.length,Math.max(4000,samplingRate/1000),tune);
+                }
                 @Override public void onFftDataCapture(Visualizer v,byte[] fft,int samplingRate){
                     if(fft==null||fft.length<64)return;
                     float[] bars=new float[72];float lowSum=0,allSum=0;
@@ -532,11 +553,11 @@ public final class MainActivity extends Activity {
                     ui.post(()->{
                         if(player!=null&&player.isPlaying()&&!PlaybackCaptureService.running){
                             spectrum.pushSpectrum(bars,rms);
-                            if(!nativeActive())engine.onAudio(rms,bass,tune,useEnvelope);
+                            // Waveform callback owns the PCM-derived haptic envelope; FFT only drives UI.
                         }
                     });
                 }
-            },hz,false,true);
+            },hz,true,true);
             visualizer.setEnabled(true);
         }catch(Exception e){
             if(visualizer!=null){try{visualizer.release();}catch(Exception ignored){}visualizer=null;}
@@ -559,7 +580,7 @@ public final class MainActivity extends Activity {
                 if(motorStatus!=null)motorStatus.setText(t("已发送振动指令：","Motor commands issued: ")+pulses);
             }
             @Override public void onCaptureState(String status,boolean active){
-                notifyStatus(status);updateDashboard();
+                requestingCapture=false;notifyStatus(status);updateDashboard();
                 if(!active&&spectrum!=null&&player==null)spectrum.setPlaying(false);
             }
         };
