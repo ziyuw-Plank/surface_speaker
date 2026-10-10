@@ -353,7 +353,7 @@ public final class MainActivity extends Activity {
                     .setNegativeButton(t("取消","Cancel"),null)
                     .setPositiveButton(t("确认测试","Confirm"),(dialog,which)->runLongTone()).show());
                 LinearLayout richtap=card(page);
-                header(richtap,t("RichTap mmap · v0.15 工具","RICHTAP MMAP · v0.14 LAB"),
+                header(richtap,t("RichTap mmap · v0.15 工具","RICHTAP MMAP · v0.15"),
                     t("根据当前手机厂商库与内核模块逆向，16 KiB 环形缓冲。未经过设备实测；请先只读检查再试短音。", 
                       "16KiB ring reconstructed from uploaded vendor binaries. Not yet verified on the physical device. Probe first."));
                 richTapStatus=text(t("未执行测试","Not yet tested"),12,MUTED,false);
