@@ -31,23 +31,23 @@ final class RootFifoTester {
     }
     static String run(Context context,boolean test,int frequency,int percent){
         if(!deviceCandidate())return "DISABLED: only Xiaomi shennong arm64 is enabled";
-        if(test&&(frequency<100||frequency>300||percent<1||percent>48))return "DISABLED: parameter bounds";
+        if(test&&(frequency<100||frequency>300||percent<1||percent>56))return "DISABLED: parameter bounds";
         String args=test?("test "+frequency+" "+percent):"probe";
         return execute(context,args,null);
     }
     static String longTone(Context context,int frequency,int strength){
         if(!deviceCandidate())return "DISABLED: Xiaomi shennong arm64 only";
-        if(frequency<100||frequency>300||strength<1||strength>48)return "DISABLED: tone limits";
+        if(frequency<100||frequency>300||strength<1||strength>56)return "DISABLED: tone limits";
         return execute(context,"long-tone "+frequency+" "+strength,null);
     }
-    static String localPreview(Context context,Uri uri,int strength){
+    static String localPreview(Context context,Uri uri,int strength,int gain){
         if(!deviceCandidate())return "DISABLED: Xiaomi shennong arm64 only";
         if(uri==null)return "ERROR: select an audio file first";
-        if(strength<1||strength>48)return "ERROR: media volume muted or invalid output limit";
+        if(strength<1||strength>56)return "ERROR: media volume muted or invalid output limit";
         if(!busy.compareAndSet(false,true))return "ERROR: native test already running";
         LocalPcmPreview.Clip clip=null;
         try {
-            clip=LocalPcmPreview.decode(context,uri);
+            clip=LocalPcmPreview.decode(context,uri,gain);
             return runPrivileged(context,"play-file",strength,clip.file);
         }catch(Exception e){return "ERROR:decode/preview "+e.getClass().getSimpleName()+": "+e.getMessage();}
         finally{if(clip!=null)clip.file.delete();busy.set(false);}
@@ -103,7 +103,7 @@ final class RootFifoTester {
             if(closed.get()||!process.isAlive()||!writerError.isEmpty())
                 throw new IllegalStateException("Native FIFO exited: "+recentLog+" "+writerError);
             if(audio.length!=LIVE_SAMPLES)throw new IllegalArgumentException("Expected 60ms PCM frame");
-            Frame frame=new Frame(audio,Math.max(0,Math.min(48,strength)));
+            Frame frame=new Frame(audio,Math.max(0,Math.min(56,strength)));
             if(!queue.offer(frame)){queue.poll();dropped++;if(!queue.offer(frame))dropped++;}
         }
         private void writeLoop(){

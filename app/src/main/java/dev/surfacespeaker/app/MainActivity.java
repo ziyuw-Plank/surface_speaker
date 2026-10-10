@@ -71,7 +71,7 @@ public final class MainActivity extends Activity {
     private final Button[] dock=new Button[4];
     private Button playButton, envelopeButton, nativeButton, shizukuButton;
     private TextView volumeLinkStatus, fifoStatus;
-    private Button volumeFollowButton;
+    private Button volumeFollowButton, fifoBoostButton;
     private final Button[] presetButtons=new Button[4];
     private final java.util.ArrayList<SeekBar> tuneBars=new java.util.ArrayList<>();
     private final java.util.ArrayList<TextView> tuneLabels=new java.util.ArrayList<>();
@@ -111,6 +111,7 @@ public final class MainActivity extends Activity {
             tune.volumeRatio=p.getInt("volumeRatio",65);
             tune.followVolume=p.getBoolean("followVolume",true);
         }
+        tune.fifoBoost=p.getBoolean("fifoBoost",false);
         useEnvelope=p.getBoolean("envelope",true);
         useNative=p.getBoolean("native",false);
         fifoPreferred=p.getBoolean("prefer_fifo",RootFifoTester.deviceCandidate());
@@ -154,7 +155,7 @@ public final class MainActivity extends Activity {
         LinearLayout top=row();top.setPadding(d(20),d(15),d(20),d(8));
         TextView brand=text("S / S",18,ACCENT,true);brand.setLetterSpacing(.18f);top.addView(brand);
         TextView heading=text("  SURFACE SPEAKER",17,TEXT,true);top.addView(heading);
-        TextView version=text("  v0.10",11,MUTED,false);top.addView(version);
+        TextView version=text("  v0.11",11,MUTED,false);top.addView(version);
         shell.addView(top,lp(-1,54));
         FrameLayout frame=new FrameLayout(this);shell.addView(frame,new LinearLayout.LayoutParams(-1,0,1));
         for(int i=0;i<4;i++){
@@ -251,6 +252,14 @@ public final class MainActivity extends Activity {
                 volumeFollowButton=subtle("");volume.addView(volumeFollowButton,lp(-1,46));
                 volumeFollowButton.setOnClickListener(v->{tune.followVolume=!tune.followVolume;preset=3;savePrefs();PlaybackCaptureService.updateTune(tune);updateVolumeControls();});
                 slider(volume,t("振动强度比例 %","Motor strength ratio %"),0,100,tune.volumeRatio,false,v->{tune.volumeRatio=v;updateVolumeControls();});
+                fifoBoostButton=subtle("");LinearLayout.LayoutParams boostParams=lp(-1,48);boostParams.topMargin=d(10);volume.addView(fifoBoostButton,boostParams);
+                fifoBoostButton.setOnClickListener(v->{
+                    if(tune.fifoBoost){tune.fifoBoost=false;preset=3;savePrefs();PlaybackCaptureService.updateTune(tune);updateVolumeControls();}
+                    else new AlertDialog.Builder(this).setTitle(t("原生 FIFO 增强档（实验）","Native FIFO boost (experimental)"))
+                      .setMessage(t("仅将软件请求的 magnitude 上限从 48% 提升至 56%，不改变驱动电压限制。可能增加发热和机械负担，尚未在此手机校准。使用时请从低音量开始；有异常立即停止。","Raises requested FF magnitude cap from 48% to 56%. Does not override driver voltage limits. Thermal and mechanical effects are uncalibrated. Start at low volume and stop for abnormal heat or noise."))
+                      .setNegativeButton(t("取消","Cancel"),null)
+                      .setPositiveButton(t("我了解风险，开启","Enable boost"),(dd,which)->{tune.fifoBoost=true;preset=3;savePrefs();PlaybackCaptureService.updateTune(tune);updateVolumeControls();}).show();
+                });
                 volumeLinkStatus=text("",12,MUTED,false);volumeLinkStatus.setPadding(0,d(10),0,0);volume.addView(volumeLinkStatus);
                 updateVolumeControls();
                 LinearLayout routes=card(page);
@@ -355,6 +364,10 @@ public final class MainActivity extends Activity {
                 (tune.followVolume?t("已开启","On"):t("已关闭","Off")));
             volumeFollowButton.setBackground(background(tune.followVolume?0xff357c62:0xff353c30,14));
         }
+        if(fifoBoostButton!=null){
+            fifoBoostButton.setText(t("FIFO 输出：","FIFO output: ")+(tune.fifoBoost?t("增强档 · 56% 上限","Boost · 56% ceiling"):t("标准档 · 48% 上限","Standard · 48% ceiling")));
+            fifoBoostButton.setBackground(background(tune.fifoBoost?0xff846632:0xff353c30,14));
+        }
         if(volumeLinkStatus!=null && engine!=null){
             int media=Math.round(100*engine.mediaVolumeFraction());
             int linked=Math.round(100*engine.effectiveOutputScale(tune));
@@ -387,8 +400,8 @@ public final class MainActivity extends Activity {
     }
     private int nativeStrength(){
         float level=engine.effectiveOutputScale(tune);
-        // Conservative ceiling with perceptual attenuation; 48% maximum is not measured displacement.
-        return level<=0f?0:Math.max(1,Math.min(48,Math.round(48f*(float)Math.sqrt(level))));
+        int cap=tune.fifoBoost?56:48; // FF magnitude request, not measured motor power
+        return level<=0f?0:Math.max(1,Math.min(cap,Math.round(cap*(float)Math.sqrt(level))));
     }
     private void runLongTone(){
         if(nativePreviewBusy || PlaybackCaptureService.running){
@@ -399,7 +412,7 @@ public final class MainActivity extends Activity {
         nativePreviewBusy=true;
         notifyStatus(t("正在发送 2 秒连续波形…","Sending 2-second continuous FIFO tone…"));
         new Thread(()->{
-            String out=RootFifoTester.longTone(getApplicationContext(),200,Math.min(48,strength));
+            String out=RootFifoTester.longTone(getApplicationContext(),200,strength);
             ui.post(()->{nativePreviewBusy=false;if(fifoStatus!=null)fifoStatus.setText(out);notifyStatus(out);});
         },"fifo-long-tone").start();
     }
@@ -418,7 +431,7 @@ public final class MainActivity extends Activity {
         notifyStatus(t("解码前 4 秒并一次性上传 FIFO…","Decoding first 4s for a single FIFO upload…"));
         Uri selected=file;
         new Thread(()->{
-            String out=RootFifoTester.localPreview(getApplicationContext(),selected,Math.min(48,strength));
+            String out=RootFifoTester.localPreview(getApplicationContext(),selected,strength,tune.gain);
             ui.post(()->{
                 nativePreviewBusy=false;
                 if(continuousPreviewButton!=null){continuousPreviewButton.setText(t("预览 4 秒连续马达音频","Preview 4s continuous motor audio"));disabled(continuousPreviewButton,RootFifoTester.deviceCandidate());}
@@ -517,7 +530,7 @@ public final class MainActivity extends Activity {
     }
     private void selectPreset(int index){
         preset=index;
-        if(index<3)tune=HapticEngine.preset(index);
+        if(index<3){boolean wasBoost=tune.fifoBoost;tune=HapticEngine.preset(index);tune.fifoBoost=wasBoost;}
         refreshSliders();refreshPresets();savePrefs();
         if(player!=null)player.setVolume(tune.speaker/100f,tune.speaker/100f);
         PlaybackCaptureService.updateTune(tune);

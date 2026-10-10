@@ -64,16 +64,16 @@ static int open_verified(char *path,size_t cap) {
 /* One upload drives one long FIFO effect; the kernel refills its 2048-byte FIFO via IRQ.
  * Never repeatedly submit short FF events to simulate audio. */
 static int play_fifo(int fd, const char *path, uint8_t *data, int samples, int strength){
-    if(samples<1200 || samples>96000 || strength<1 || strength>48){
+    if(samples<1200 || samples>96000 || strength<1 || strength>56){
         fprintf(stderr,"ERROR: unsupported FIFO samples=%d strength=%d\n",samples,strength);
         return 2;
     }
     // Cap ALL sample bytes, including a file supplied by a privileged caller.
     for(int i=0;i<samples;i++){
         int v=(int)(int8_t)data[i];
-        if(v>76)v=76;
-        if(v< -76)v=-76;
-        int ramp=live_mode?48:360;
+        if(v>92)v=92;
+        if(v< -92)v=-92;
+        int ramp=live_mode?18:240;
         int fade=i<ramp?i:(samples-1-i<ramp?samples-1-i:ramp);
         if(fade<0)fade=0;
         v=v*fade/ramp;
@@ -131,7 +131,7 @@ int main(int argc,char **argv){
             if(fread(&strength,1,1,stdin)!=1)break;
             size_t n=fread(pcm,1,NSAMPLES,stdin);
             if(n!=(size_t)NSAMPLES){fprintf(stderr,"ERROR:short incoming audio block %zu\n",n);failures++;break;}
-            if(strength>48){fprintf(stderr,"ERROR:strength exceeds native safety ceiling\n");failures++;break;}
+            if(strength>56){fprintf(stderr,"ERROR:strength exceeds native safety ceiling (56%%)\n");failures++;break;}
             if(strength==0){sleep_ms(60);}
             else {int rc=play_fifo(fd,"live",pcm,NSAMPLES,strength);if(rc){failures++;break;}}
             chunks++;
@@ -149,7 +149,7 @@ int main(int argc,char **argv){
     if(argc!=4 && argc!=5){fprintf(stderr,"ERROR:expected 2 parameters and optional stop marker\n");close(fd);return 2;}
     if(argc==5)stop_marker=argv[4];
     char *end=NULL;long strength=strtol(argv[3],&end,10);
-    if(*end || strength<1 || strength>48){fprintf(stderr,"ERROR:strength must be 1..48%%\n");close(fd);return 2;}
+    if(*end || strength<1 || strength>56){fprintf(stderr,"ERROR:strength must be 1..56%%\n");close(fd);return 2;}
     uint8_t *samples=NULL;int n=0;
     if(tone){
         end=NULL;long hz=strtol(argv[2],&end,10);
@@ -157,7 +157,7 @@ int main(int argc,char **argv){
         n=!strcmp(argv[1],"test")?1200:48000;
         samples=calloc(n,1);if(!samples){close(fd);return 3;}
         for(int i=0;i<n;i++){
-            int v=(int)lrint(76.0*sin(2*M_PI*(double)hz*i/24000.0));
+            int v=(int)lrint(80.0*sin(2*M_PI*(double)hz*i/24000.0));
             samples[i]=(uint8_t)(int8_t)v;
         }
     }else{

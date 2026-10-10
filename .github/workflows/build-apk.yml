@@ -17,6 +17,13 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - name: Verify FIFO PCM DSP without Android framework
+        run: |
+          mkdir -p "$RUNNER_TEMP/surface-dsp-test"
+          javac -d "$RUNNER_TEMP/surface-dsp-test" \
+            app/src/main/java/dev/surfacespeaker/app/MotorPcmDsp.java \
+            app/src/test/java/dev/surfacespeaker/app/MotorPcmDspSmokeTest.java
+          java -cp "$RUNNER_TEMP/surface-dsp-test" dev.surfacespeaker.app.MotorPcmDspSmokeTest
       - name: SDK 36 (hosted runner)
         run: |
           SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -1)"
@@ -39,6 +46,6 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: SurfaceSpeaker-v0.10-debug-apk
+          name: SurfaceSpeaker-v0.11-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error

@@ -28,9 +28,10 @@ final class LocalPcmPreview {
         private int count;
         private long sourceIndex;
         private double nextPosition;
-        private float last, oldX, high, low;
-        private static final float HP=(float)Math.exp(-2*Math.PI*60/SAMPLE_RATE);
-        private static final float LP=1-(float)Math.exp(-2*Math.PI*480/SAMPLE_RATE);
+        private float last;
+        private final MotorPcmDsp dsp=new MotorPcmDsp();
+        private final int gain;
+        Converter(int gain){this.gain=gain;}
         boolean full(){return count>=MAX_SAMPLES;}
         void put(float value,int inputRate){
             if(full())return;
@@ -39,13 +40,8 @@ final class LocalPcmPreview {
                 float v;
                 if(sourceIndex==0)v=x;
                 else v=last+(x-last)*(float)Math.min(1,Math.max(0,nextPosition-(sourceIndex-1)));
-                high=HP*(high+v-oldX);
-                oldX=v;
-                low+=LP*(high-low);
-                // PCM output stays within about +/-24/127 prior to driver magnitude scaling.
-                float shaped=(float)Math.tanh(low*4.1)*76;
-                float fade=Math.min(1f, Math.min((count+1)/1800f,(MAX_SAMPLES-count)/1800f));
-                pcm[count++]=(byte)Math.round(Math.max(-76,Math.min(76,shaped*fade)));
+                float fade=Math.min(1f,Math.min((count+1)/240f,(MAX_SAMPLES-count)/240f));
+                pcm[count++]=(byte)Math.round(dsp.convert(v,gain)*fade);
                 nextPosition+=(double)inputRate/SAMPLE_RATE;
             }
             last=x;
@@ -54,16 +50,16 @@ final class LocalPcmPreview {
         Clip write(Context c)throws Exception{
             if(count<2400)throw new IllegalStateException("Audio shorter than 100 ms or decoder returned no PCM");
             // Apply a real end fade even when the file is shorter than four seconds.
-            int ramp=Math.min(1800,count/3);
+            int ramp=Math.min(240,count/3);
             for(int i=0;i<ramp;i++)pcm[count-1-i]=(byte)Math.round(pcm[count-1-i]*((float)i/ramp));
             File file=File.createTempFile("ssfifo-clip-",".raw",c.getCacheDir());
             try(FileOutputStream out=new FileOutputStream(file)){out.write(pcm,0,count);}
             return new Clip(file,count);
         }
     }
-    static Clip decode(Context context,Uri uri) throws Exception {
+    static Clip decode(Context context,Uri uri,int gain) throws Exception {
         MediaExtractor extractor=new MediaExtractor();MediaCodec codec=null;
-        Converter cv=new Converter();
+        Converter cv=new Converter(gain);
         try {
             extractor.setDataSource(context,uri,null);
             int track=-1;MediaFormat format=null;

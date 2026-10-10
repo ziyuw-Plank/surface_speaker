@@ -124,13 +124,15 @@ public final class PlaybackCaptureService extends Service {
             if(frame.rms<0.006f)silent++;else silent=0;
             if(nativeMode){
                 try{
+                    converter.setGain(settings.gain);
                     converter.consume(pcm,count,sampleRate,frameData->{
                         RootFifoTester.LiveSession session=liveSession;
                         if(session==null)throw new IllegalStateException("Native root stream stopped");
                         HapticEngine.Tune nowTune=settings;
                         float level=motor.effectiveOutputScale(nowTune);
                         // Square-root law keeps dynamics audible at normal system volume.
-                        int strength=level<=0f?0:Math.max(1,Math.min(48,Math.round(48f*(float)Math.sqrt(level))));
+                        int ceiling=nowTune.fifoBoost?56:48;
+                        int strength=level<=0f?0:Math.max(1,Math.min(ceiling,Math.round(ceiling*(float)Math.sqrt(level))));
                         int peak=0;for(byte sample:frameData)peak=Math.max(peak,Math.abs((int)sample));
                         if(peak<3)strength=0;
                         session.writeFrame(frameData,strength);
