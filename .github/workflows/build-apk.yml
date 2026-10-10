@@ -8,35 +8,21 @@ jobs:
   android-debug:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Restore v0.3 sources
-        run: |
-          base64 -d bootstrap/source.tar.xz.b64 > /tmp/surfacespeaker-src.tar.xz
-          echo "60b79e4c27bba9f7f99cd4262329802f9df0491d857eb18750886ae3b5ec1652  /tmp/surfacespeaker-src.tar.xz" | sha256sum -c -
-          tar -xJf /tmp/surfacespeaker-src.tar.xz
-          test -f app/src/main/java/dev/surfacespeaker/app/MainActivity.java
-          rm -rf bootstrap
-      - name: Publish readable source files
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
-          if ! git diff --cached --quiet; then
-            git commit -m 'feat: unpack SurfaceSpeaker v0.3 sources'
-            git push origin HEAD:main
-          fi
       - name: Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-      - name: Install Android SDK
-        uses: android-actions/setup-android@v3
-      - name: SDK 36
-        run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
+      - name: SDK 36 (hosted runner)
+        run: |
+          echo "ANDROID_HOME=${ANDROID_HOME}"
+          command -v sdkmanager
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
       - name: Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
         with:
