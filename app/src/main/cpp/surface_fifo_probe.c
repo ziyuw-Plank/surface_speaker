@@ -73,10 +73,12 @@ static int play_fifo(int fd, const char *path, uint8_t *data, int samples, int s
         int v=(int)(int8_t)data[i];
         if(v>92)v=92;
         if(v< -92)v=-92;
-        int ramp=live_mode?18:240;
-        int fade=i<ramp?i:(samples-1-i<ramp?samples-1-i:ramp);
-        if(fade<0)fade=0;
-        v=v*fade/ramp;
+        int ramp=live_mode?0:240; // Preserve real PCM phase/amplitude across live frame boundaries.
+        if(ramp>0){
+            int fade=i<ramp?i:(samples-1-i<ramp?samples-1-i:ramp);
+            if(fade<0)fade=0;
+            v=v*fade/ramp;
+        }
         data[i]=(uint8_t)(int8_t)v;
     }
     struct qcom_fifo_payload payload={.idx=0,.length=(uint32_t)samples,.play_rate_hz=24000,.data=data};
@@ -124,22 +126,41 @@ int main(int argc,char **argv){
         uint8_t *pcm=malloc(NSAMPLES);if(!pcm){close(fd);return 3;}
         live_mode=1;
         setvbuf(stdout,NULL,_IOLBF,0);
-        printf("READY: low latency live FIFO, 60ms discrete FF_CUSTOM segments; not gapless\n");
-        int chunks=0, failures=0;
-        while(!aborted && chunks<1000 && access(stop_marker,F_OK)!=0) { // up to 60s of submitted audio
+        printf("READY: persistent native FIFO session, 60ms discrete FF_CUSTOM segments; not gapless\n");
+        unsigned long long chunks=0;
+        int failures=0;
+        float sustainedLoad=0.0f; // Energy budget proxy. Not a real motor temperature sensor.
+        int warnedDerating=0;
+        while(!aborted && access(stop_marker,F_OK)!=0) { // Runs until user stops, projection ends, or a real I/O error.
             uint8_t strength=0;
             if(fread(&strength,1,1,stdin)!=1)break;
             size_t n=fread(pcm,1,NSAMPLES,stdin);
             if(n!=(size_t)NSAMPLES){fprintf(stderr,"ERROR:short incoming audio block %zu\n",n);failures++;break;}
             if(strength>56){fprintf(stderr,"ERROR:strength exceeds native safety ceiling (56%%)\n");failures++;break;}
-            if(strength==0){sleep_ms(60);}
-            else {int rc=play_fifo(fd,"live",pcm,NSAMPLES,strength);if(rc){failures++;break;}}
+            // Slow energy estimate: conservatively derate prolonged loud drive instead of
+            // stopping playback every 15 s. Never bypass the PMIC/driver's own protections.
+            double sq=0.0;
+            for(int i=0;i<NSAMPLES;i++){float v=(float)(int8_t)pcm[i]/92.0f;sq+=(double)v*v;}
+            float requested=(float)strength/56.0f;
+            float frameLoad=(float)(sq/NSAMPLES)*requested*requested;
+            sustainedLoad=0.998f*sustainedLoad+0.002f*frameLoad;
+            int permitted=strength;
+            if(sustainedLoad>0.32f){
+                float derate=1.0f-0.38f*fminf(1.0f,(sustainedLoad-0.32f)/0.35f);
+                permitted=(int)lrintf((float)strength*derate);
+                if(permitted<1 && strength>0)permitted=1;
+                if(!warnedDerating){
+                    fprintf(stderr,"STATUS: sustained-drive guard active; amplitude reduced (not a temperature measurement)\n");
+                    warnedDerating=1;
+                }
+            } else warnedDerating=0;
+            if(permitted==0){sleep_ms(60);}
+            else {int rc=play_fifo(fd,"live",pcm,NSAMPLES,permitted);if(rc){failures++;break;}}
             chunks++;
-            printf("NEXT:%d\n",chunks); // ACK: Java never queues more than one future frame
-            if(chunks%50==0){fprintf(stderr,"STATUS: live blocks=%d, 60ms each; hardware is segmented\n",chunks);}
-            if(chunks%250==0 && chunks<1000){fprintf(stderr,"STATUS: cooling pause 1s after 15s playback\n");sleep_ms(1000);}
+            printf("NEXT:%llu\n",chunks); // ACK; Java never queues more than one future frame
+            if(chunks%250==0){fprintf(stderr,"STATUS: live blocks=%llu, user-controlled persistent capture; FF_CUSTOM remains segmented\n",chunks);}
         }
-        fprintf(stderr,"DONE:live blocks=%d errors=%d\n",chunks,failures);
+        fprintf(stderr,"DONE:live blocks=%llu errors=%d\n",chunks,failures);
         free(pcm);close(fd);return failures?9:0;
     }
     if(!strcmp(argv[1],"probe")){printf("OK: %s FF_PERIODIC+FF_CUSTOM advertised (no actual playback confirmed)\n",path);close(fd);return 0;}

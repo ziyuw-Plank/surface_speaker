@@ -40,14 +40,14 @@ final class RootFifoTester {
         if(frequency<100||frequency>300||strength<1||strength>56)return "DISABLED: tone limits";
         return execute(context,"long-tone "+frequency+" "+strength,null);
     }
-    static String localPreview(Context context,Uri uri,int strength,int gain){
+    static String localPreview(Context context,Uri uri,int strength,int gain,int detail){
         if(!deviceCandidate())return "DISABLED: Xiaomi shennong arm64 only";
         if(uri==null)return "ERROR: select an audio file first";
         if(strength<1||strength>56)return "ERROR: media volume muted or invalid output limit";
         if(!busy.compareAndSet(false,true))return "ERROR: native test already running";
         LocalPcmPreview.Clip clip=null;
         try {
-            clip=LocalPcmPreview.decode(context,uri,gain);
+            clip=LocalPcmPreview.decode(context,uri,gain,detail);
             return runPrivileged(context,"play-file",strength,clip.file);
         }catch(Exception e){return "ERROR:decode/preview "+e.getClass().getSimpleName()+": "+e.getMessage();}
         finally{if(clip!=null)clip.file.delete();busy.set(false);}

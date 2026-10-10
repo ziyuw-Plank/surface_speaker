@@ -104,7 +104,7 @@ public final class MainActivity extends Activity {
         preset=p.getInt("preset",0); if(preset<0||preset>3)preset=0;
         tune=preset==3?new HapticEngine.Tune():HapticEngine.preset(preset);
         if(preset==3){
-            tune.gain=p.getInt("gain",32);tune.bass=p.getInt("bass",55);
+            tune.gain=p.getInt("gain",32);tune.bass=p.getInt("bass",55);tune.detail=p.getInt("detail",65);
             tune.gate=p.getInt("gate",20);tune.smoothing=p.getInt("smooth",55);
             tune.pulse=Math.max(40,p.getInt("pulse",60));tune.frequency=p.getInt("freq",130);
             tune.speaker=p.getInt("speaker",35);
@@ -117,7 +117,7 @@ public final class MainActivity extends Activity {
         fifoPreferred=p.getBoolean("prefer_fifo",RootFifoTester.deviceCandidate());
     }
     private void savePrefs(){getSharedPreferences("tune",MODE_PRIVATE).edit()
-        .putInt("preset",preset).putInt("gain",tune.gain)
+        .putInt("preset",preset).putInt("gain",tune.gain).putInt("detail",tune.detail)
         .putInt("bass",tune.bass).putInt("gate",tune.gate)
         .putInt("smooth",tune.smoothing).putInt("pulse",tune.pulse)
         .putInt("freq",tune.frequency).putInt("speaker",tune.speaker)
@@ -155,7 +155,7 @@ public final class MainActivity extends Activity {
         LinearLayout top=row();top.setPadding(d(20),d(15),d(20),d(8));
         TextView brand=text("S / S",18,ACCENT,true);brand.setLetterSpacing(.18f);top.addView(brand);
         TextView heading=text("  SURFACE SPEAKER",17,TEXT,true);top.addView(heading);
-        TextView version=text("  v0.11",11,MUTED,false);top.addView(version);
+        TextView version=text("  v0.12",11,MUTED,false);top.addView(version);
         shell.addView(top,lp(-1,54));
         FrameLayout frame=new FrameLayout(this);shell.addView(frame,new LinearLayout.LayoutParams(-1,0,1));
         for(int i=0;i<4;i++){
@@ -239,6 +239,7 @@ public final class MainActivity extends Activity {
                 header(adjust,t("细节调节","FINE TUNING"),t("松开滑块可触发一次短振动预览","Release a slider for a short haptic preview"));
                 slider(adjust,t("振动增益","Haptic gain"),0,100,tune.gain,false,v->tune.gain=v);
                 slider(adjust,t("低频权重","Bass weighting"),0,100,tune.bass,false,v->tune.bass=v);
+                slider(adjust,t("FIFO 波形细节","FIFO waveform detail"),0,100,tune.detail,false,v->tune.detail=v);
                 slider(adjust,t("触发阈值","Noise gate"),0,70,tune.gate,false,v->tune.gate=v);
                 slider(adjust,t("平滑","Smoothing"),0,100,tune.smoothing,false,v->tune.smoothing=v);
                 slider(adjust,t("振动包络刷新窗口 ms","Envelope update window ms"),40,80,tune.pulse,false,v->tune.pulse=v);
@@ -431,7 +432,7 @@ public final class MainActivity extends Activity {
         notifyStatus(t("解码前 4 秒并一次性上传 FIFO…","Decoding first 4s for a single FIFO upload…"));
         Uri selected=file;
         new Thread(()->{
-            String out=RootFifoTester.localPreview(getApplicationContext(),selected,strength,tune.gain);
+            String out=RootFifoTester.localPreview(getApplicationContext(),selected,strength,tune.gain,tune.detail);
             ui.post(()->{
                 nativePreviewBusy=false;
                 if(continuousPreviewButton!=null){continuousPreviewButton.setText(t("预览 4 秒连续马达音频","Preview 4s continuous motor audio"));disabled(continuousPreviewButton,RootFifoTester.deviceCandidate());}
@@ -476,7 +477,7 @@ public final class MainActivity extends Activity {
             captureButton.setAlpha(requestingCapture && !live?0.72f:1f);
         }
         if(captureStatus!=null){
-            captureStatus.setText(live?(fifoPreferred?t("● FIFO 分段实时捕获 · 约 60ms 缓冲","● Live buffered FIFO · 60ms segments"):t("● Android 兼容捕获","● Android compatibility capture"))
+            captureStatus.setText(live?(fifoPreferred?t("● FIFO 持续捕获 · 手动停止 · 60ms 分段","● Persistent FIFO capture · manual stop · 60ms segments"):t("● Android 兼容捕获","● Android compatibility capture"))
                 :requestingCapture?t("等待音频权限与系统同意","Waiting for system consent")
                 :t("实时捕获未激活","Live capture inactive"));
             captureStatus.setTextColor(live?ACCENT:MUTED);
@@ -513,7 +514,7 @@ public final class MainActivity extends Activity {
         });
     }
     private void refreshSliders(){
-        int[] values={tune.gain,tune.bass,tune.gate,tune.smoothing,tune.pulse,tune.frequency,tune.speaker,tune.volumeRatio};
+        int[] values={tune.gain,tune.bass,tune.detail,tune.gate,tune.smoothing,tune.pulse,tune.frequency,tune.speaker,tune.volumeRatio};
         for(int i=0;i<tuneBars.size();i++){
             SeekBar s=tuneBars.get(i);int[] bounds=(int[])s.getTag();int val=Math.max(bounds[0],Math.min(bounds[1],values[i]));
             s.setProgress(val-bounds[0]);

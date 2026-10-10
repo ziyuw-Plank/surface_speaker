@@ -45,6 +45,7 @@ public final class PlaybackCaptureService extends Service {
     private Thread captureThread;
     private HapticEngine motor;
     private volatile RootFifoTester.LiveSession liveSession;
+    private volatile String stopError;
 
     private void state(String s,boolean active){
         handler.post(()->{Listener l=listener;if(l!=null)l.onCaptureState(s,active);});
@@ -54,6 +55,7 @@ public final class PlaybackCaptureService extends Service {
         if(intent==null)return START_NOT_STICKY;
         if(STOP.equals(intent.getAction())){shutdown();stopSelf();return START_NOT_STICKY;}
         if(!START.equals(intent.getAction()))return START_NOT_STICKY;
+        stopError=null;
         if(active.get()){state("Already capturing",true);return START_NOT_STICKY;}
         try {
             NotificationManager nm=getSystemService(NotificationManager.class);
@@ -75,7 +77,7 @@ public final class PlaybackCaptureService extends Service {
             projection=manager.getMediaProjection(code,data);
             if(projection==null)throw new IllegalStateException("Projection unavailable");
             projection.registerCallback(new MediaProjection.Callback(){
-                @Override public void onStop(){shutdown();stopSelf();}
+                @Override public void onStop(){stopError="Android ended audio capture permission";shutdown();stopSelf();}
             },handler);
             AudioPlaybackCaptureConfiguration capture=new AudioPlaybackCaptureConfiguration.Builder(projection)
                 .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
@@ -94,7 +96,7 @@ public final class PlaybackCaptureService extends Service {
             if(recorder.getRecordingState()!=AudioRecord.RECORDSTATE_RECORDING)throw new IllegalStateException("Audio capture could not start");
             active.set(true);running=true;motor.setEnabled(true);state("Capture running",true);
             captureThread=new Thread(()->captureLoop(sampleRate),"surface-pcm-capture");captureThread.start();
-        }catch(Exception e){state("Capture failed: "+e.getClass().getSimpleName()+" "+e.getMessage(),false);shutdown();stopSelf();}
+        }catch(Exception e){stopError="Capture failed: "+e.getClass().getSimpleName()+" "+e.getMessage();shutdown();stopSelf();}
         return START_NOT_STICKY;
     }
     private void captureLoop(int sampleRate){
@@ -110,21 +112,21 @@ public final class PlaybackCaptureService extends Service {
                 state(routeMessage,true);
             }catch(Exception e){
                 routeMessage="Native FIFO unavailable: "+e.getMessage();
-                state(routeMessage,false);shutdown();stopSelf();return;
+                stopError=routeMessage;shutdown();stopSelf();return;
             }
         }else{routeMessage="Android Haptics compatibility";}
 
         int silent=0;
         while(active.get()){
             int count;
-            try {count=recorder.read(pcm,0,pcm.length,AudioRecord.READ_BLOCKING);}catch(Exception e){state("Audio read error: "+e.getMessage(),false);break;}
-            if(count<0){state("Audio read returned error "+count,false);break;}
+            try {count=recorder.read(pcm,0,pcm.length,AudioRecord.READ_BLOCKING);}catch(Exception e){stopError="Audio read error: "+e.getMessage();break;}
+            if(count<0){stopError="Audio read returned error "+count;break;}
             if(count<128)continue;
             AudioAnalysis.Frame frame=fft.analyze(pcm,count,sampleRate);
             if(frame.rms<0.006f)silent++;else silent=0;
             if(nativeMode){
                 try{
-                    converter.setGain(settings.gain);
+                    converter.setTune(settings.gain,settings.detail);
                     converter.consume(pcm,count,sampleRate,frameData->{
                         RootFifoTester.LiveSession session=liveSession;
                         if(session==null)throw new IllegalStateException("Native root stream stopped");
@@ -139,7 +141,7 @@ public final class PlaybackCaptureService extends Service {
                         nativeBlocks=session.frames();nativeDropped=session.dropped();
                         if(!session.alive())throw new IllegalStateException(session.recentLog());
                     });
-                }catch(Exception e){routeMessage="Native FIFO streaming error: "+e.getMessage();state(routeMessage,false);break;}
+                }catch(Exception e){routeMessage="Native FIFO streaming error: "+e.getMessage();stopError=routeMessage;break;}
             }else motor.onPcm(pcm,count,sampleRate,settings);
             long now=android.os.SystemClock.uptimeMillis();
             if(now-lastUi>65){
@@ -161,7 +163,7 @@ public final class PlaybackCaptureService extends Service {
         if(r!=null){try{r.stop();}catch(Exception ignored){}try{r.release();}catch(Exception ignored){}}
         MediaProjection p=projection;projection=null;
         if(p!=null)try{p.stop();}catch(Exception ignored){}
-        state("Capture stopped",false);
+        state(stopError==null?"Capture stopped by user or service":"Capture ended: "+stopError,false);
     }
     @Override public void onDestroy(){shutdown();super.onDestroy();}
     @Override public IBinder onBind(Intent i){return null;}

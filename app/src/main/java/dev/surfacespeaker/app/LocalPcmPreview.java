@@ -30,8 +30,8 @@ final class LocalPcmPreview {
         private double nextPosition;
         private float last;
         private final MotorPcmDsp dsp=new MotorPcmDsp();
-        private final int gain;
-        Converter(int gain){this.gain=gain;}
+        private final int gain, detail;
+        Converter(int gain,int detail){this.gain=gain;this.detail=detail;}
         boolean full(){return count>=MAX_SAMPLES;}
         void put(float value,int inputRate){
             if(full())return;
@@ -41,7 +41,7 @@ final class LocalPcmPreview {
                 if(sourceIndex==0)v=x;
                 else v=last+(x-last)*(float)Math.min(1,Math.max(0,nextPosition-(sourceIndex-1)));
                 float fade=Math.min(1f,Math.min((count+1)/240f,(MAX_SAMPLES-count)/240f));
-                pcm[count++]=(byte)Math.round(dsp.convert(v,gain)*fade);
+                pcm[count++]=(byte)Math.round(dsp.convert(v,gain,detail)*fade);
                 nextPosition+=(double)inputRate/SAMPLE_RATE;
             }
             last=x;
@@ -57,9 +57,9 @@ final class LocalPcmPreview {
             return new Clip(file,count);
         }
     }
-    static Clip decode(Context context,Uri uri,int gain) throws Exception {
+    static Clip decode(Context context,Uri uri,int gain,int detail) throws Exception {
         MediaExtractor extractor=new MediaExtractor();MediaCodec codec=null;
-        Converter cv=new Converter(gain);
+        Converter cv=new Converter(gain,detail);
         try {
             extractor.setDataSource(context,uri,null);
             int track=-1;MediaFormat format=null;
