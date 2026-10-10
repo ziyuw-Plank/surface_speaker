@@ -63,11 +63,14 @@ static int open_verified(char *path,size_t cap) {
 /* One upload drives one long FIFO effect; the kernel refills its 2048-byte FIFO via IRQ.
  * Never repeatedly submit short FF events to simulate audio. */
 static int play_fifo(int fd, const char *path, uint8_t *data, int samples, int strength){
-    if(samples<2400 || samples>96000 || strength<1 || strength>25)return 2;
+    if(samples<1200 || samples>96000 || strength<1 || strength>25){
+        fprintf(stderr,"ERROR: unsupported FIFO samples=%d strength=%d\n",samples,strength);
+        return 2;
+    }
     // Cap ALL sample bytes, including a file supplied by a privileged caller.
     for(int i=0;i<samples;i++){
         int v=(int)(int8_t)data[i];
-        if(v>24)v=24;if(v< -24)v=-24;
+        if(v>48)v=48;if(v< -48)v=-48;
         int fade=i<960?i:(samples-1-i<960?samples-1-i:960);
         if(fade<0)fade=0;
         v=v*fade/960;
@@ -81,11 +84,14 @@ static int play_fifo(int fd, const char *path, uint8_t *data, int samples, int s
     effect.u.periodic.magnitude=(uint16_t)((32767L*strength)/100L);
     effect.u.periodic.custom_len=sizeof(payload);
     effect.u.periodic.custom_data=(int16_t*)&payload;
+    fprintf(stderr,"STATUS: upload FF_CUSTOM samples=%d rate=24000 magnitude=%d percent\n",samples,strength);
     if(ioctl(fd,EVIOCSFF,&effect)<0){fprintf(stderr,"ERROR:EVIOCSFF: %s\n",strerror(errno));return 4;}
+    fprintf(stderr,"STATUS: effect uploaded id=%d\n",effect.id);
     struct input_event ev;memset(&ev,0,sizeof(ev));ev.type=EV_FF;ev.code=effect.id;ev.value=1;
     if(write(fd,&ev,sizeof(ev))!=(ssize_t)sizeof(ev)){
         fprintf(stderr,"ERROR:start write: %s\n",strerror(errno));ioctl(fd,EVIOCRMFF,effect.id);return 5;
     }
+    fprintf(stderr,"STATUS: EV_FF start accepted. Actual motor displacement is unverified.\n");
     int total=samples/24+60;
     for(int elapsed=0;elapsed<total && !aborted;elapsed+=25){
         if(stop_marker && access(stop_marker,F_OK)==0){aborted=1;break;}
@@ -94,7 +100,7 @@ static int play_fifo(int fd, const char *path, uint8_t *data, int samples, int s
     ev.value=0;(void)write(fd,&ev,sizeof(ev));
     sleep_ms(25);
     (void)ioctl(fd,EVIOCRMFF,effect.id);
-    printf("OK:%s single FIFO upload %d samples (%.2fs), 24kHz, magnitude %d%%; physical waveform not measured\n",
+    printf("OK:%s single FIFO upload %d samples (%.2fs), 24kHz, magnitude %d%%; kernel accepted FF_CUSTOM; actual motor vibration NOT verified\n",
         path,samples,samples/24000.0,strength);
     return aborted?130:0;
 }
@@ -117,7 +123,7 @@ int main(int argc,char **argv){
         n=!strcmp(argv[1],"test")?1200:48000;
         samples=calloc(n,1);if(!samples){close(fd);return 3;}
         for(int i=0;i<n;i++){
-            int v=(int)lrint(24.0*sin(2*M_PI*(double)hz*i/24000.0));
+            int v=(int)lrint(48.0*sin(2*M_PI*(double)hz*i/24000.0));
             samples[i]=(uint8_t)(int8_t)v;
         }
     }else{

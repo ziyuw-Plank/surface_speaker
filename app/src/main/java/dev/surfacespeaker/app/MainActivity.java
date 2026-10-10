@@ -61,6 +61,10 @@ public final class MainActivity extends Activity {
     private boolean requestingCapture=false;
     private long lastNativeTestMs=0;
     private boolean nativePreviewBusy=false;
+    // Preferred local playback engine. Native FIFO is an explicit 4-second preview, not full-track streaming.
+    private boolean fifoPreferred=false;
+    private Button fifoRouteButton;
+    private TextView routeStatus;
     private Button continuousPreviewButton;
     private final ScrollView[] sections=new ScrollView[4];
     private final Button[] dock=new Button[4];
@@ -107,6 +111,7 @@ public final class MainActivity extends Activity {
         }
         useEnvelope=p.getBoolean("envelope",true);
         useNative=p.getBoolean("native",false);
+        fifoPreferred=p.getBoolean("prefer_fifo",RootFifoTester.deviceCandidate());
     }
     private void savePrefs(){getSharedPreferences("tune",MODE_PRIVATE).edit()
         .putInt("preset",preset).putInt("gain",tune.gain)
@@ -114,7 +119,8 @@ public final class MainActivity extends Activity {
         .putInt("smooth",tune.smoothing).putInt("pulse",tune.pulse)
         .putInt("freq",tune.frequency).putInt("speaker",tune.speaker)
         .putBoolean("envelope",useEnvelope).putBoolean("native",useNative)
-        .putInt("volumeRatio",tune.volumeRatio).putBoolean("followVolume",tune.followVolume).apply();}
+        .putInt("volumeRatio",tune.volumeRatio).putBoolean("followVolume",tune.followVolume)
+        .putBoolean("prefer_fifo",fifoPreferred).apply();}
     private int d(float size){return (int)(size*getResources().getDisplayMetrics().density+0.5f);}
     private GradientDrawable background(int color,int radius){GradientDrawable b=new GradientDrawable();b.setColor(color);b.setCornerRadius(d(radius));return b;}
     private TextView text(String s,int sp,int color,boolean bold){
@@ -146,7 +152,7 @@ public final class MainActivity extends Activity {
         LinearLayout top=row();top.setPadding(d(20),d(15),d(20),d(8));
         TextView brand=text("S / S",18,ACCENT,true);brand.setLetterSpacing(.18f);top.addView(brand);
         TextView heading=text("  SURFACE SPEAKER",17,TEXT,true);top.addView(heading);
-        TextView version=text("  v0.6",11,MUTED,false);top.addView(version);
+        TextView version=text("  v0.8",11,MUTED,false);top.addView(version);
         shell.addView(top,lp(-1,54));
         FrameLayout frame=new FrameLayout(this);shell.addView(frame,new LinearLayout.LayoutParams(-1,0,1));
         for(int i=0;i<4;i++){
@@ -181,8 +187,16 @@ public final class MainActivity extends Activity {
                 header(playback,t("播放器","PLAYER"),t("选中文件后自动准备并播放；无需 Root","Select audio to play immediately; no root needed"));
                 trackLabel=text(t("尚未选择音乐","No track selected"),14,TEXT,false);trackLabel.setPadding(0,0,0,d(12));playback.addView(trackLabel);
                 Button choose=subtle(t("选择音频文件","Choose audio file"));playback.addView(choose,lp(-1,50));choose.setOnClickListener(v->openFile());
+                fifoRouteButton=subtle("");LinearLayout.LayoutParams rpRoute=lp(-1,46);rpRoute.topMargin=d(10);playback.addView(fifoRouteButton,rpRoute);
+                fifoRouteButton.setOnClickListener(v->{
+                    if(nativePreviewBusy){notifyStatus(t("先结束正在运行的 FIFO","Stop the running FIFO first"));return;}
+                    stop();fifoPreferred=!fifoPreferred;savePrefs();updatePlaybackRoute();updateDashboard();
+                });
+                routeStatus=text("",12,MUTED,false);routeStatus.setPadding(0,d(8),0,d(5));routeStatus.setTextIsSelectable(true);playback.addView(routeStatus);
+                Button quickProbe=subtle(t("检测 FIFO / Root 是否可用","Check FIFO / Root access"));playback.addView(quickProbe,lp(-1,45));
+                quickProbe.setOnClickListener(v->runFifo(false,200));
                 playButton=button(t("开始播放","Play"));LinearLayout.LayoutParams pp=lp(-1,50);pp.topMargin=d(10);playback.addView(playButton,pp);
-                disabled(playButton,false);playButton.setOnClickListener(v->playPause());
+                disabled(playButton,false);playButton.setOnClickListener(v->onPlaybackPressed());
                 LinearLayout fifoMusic=card(page);
                 header(fifoMusic,t("连续 FIFO · 音频预览 (ROOT)","CONTINUOUS FIFO · AUDIO PREVIEW (ROOT)"),
                     t("将所选音频前 4 秒转换为 24kHz 低强度真实波形；单次上传后由内核 FIFO 自动续写。不是全曲实时播放。", 
@@ -200,7 +214,8 @@ public final class MainActivity extends Activity {
                 LinearLayout.LayoutParams sn=lp(-1,43);sn.topMargin=d(8);fifoMusic.addView(stopNative,sn);
                 stopNative.setOnClickListener(v->{RootFifoTester.cancel();notifyStatus(t("已发送 FIFO 停止请求","FIFO stop requested"));});
 
-                Button stop=subtle(t("停止播放","Stop player"));LinearLayout.LayoutParams sp=lp(-1,45);sp.topMargin=d(8);playback.addView(stop,sp);stop.setOnClickListener(v->{stop();notifyStatus(t("已停止","Stopped"));});
+                Button stop=subtle(t("停止播放","Stop player"));LinearLayout.LayoutParams sp=lp(-1,45);sp.topMargin=d(8);playback.addView(stop,sp);
+                stop.setOnClickListener(v->{RootFifoTester.cancel();stop();updatePlaybackRoute();notifyStatus(t("已发送停止指令","Stop requested"));});
                 TextView info=text(t("部分编码格式可能不受系统播放器支持。请选择 MP3/WAV 文件测试。","Unsupported codecs may fail. Try an MP3/WAV file."),12,MUTED,false);
                 LinearLayout.LayoutParams in=lp(-1,-2);in.topMargin=d(12);playback.addView(info,in);
             }else if(i==2){
@@ -301,7 +316,29 @@ public final class MainActivity extends Activity {
             if(i>0)par.leftMargin=d(5);nav.addView(b,par);b.setOnClickListener(v->showTab(tab));
         }
         shell.addView(nav,lp(-1,76));setContentView(shell);
-        showTab(0);refreshSliders();refreshPresets();updateCapabilityButtons();
+        showTab(0);refreshSliders();refreshPresets();updateCapabilityButtons();updatePlaybackRoute();
+    }
+    private void updatePlaybackRoute(){
+        if(fifoRouteButton!=null){
+            fifoRouteButton.setText(fifoPreferred?t("输出模式：● 原生 FIFO（默认）· 点击切换","Output: ● Native FIFO (default) · Tap to switch"):
+               t("输出模式：● Android 兼容振动 · 点击切换","Output: ● Android compatibility · Tap to switch"));
+            fifoRouteButton.setBackground(background(fifoPreferred?0xff357c62:0xff353c30,14));
+            fifoRouteButton.setTextColor(fifoPreferred?Color.WHITE:TEXT);
+        }
+        if(routeStatus!=null && !nativePreviewBusy){
+            routeStatus.setText(fifoPreferred?
+                t("选择本地音频后，按播放才会调用 Root FIFO。当前仅播放前 4 秒，不能全曲连续或抓取其他 App 的 FIFO。失败详情会显示在这里。",
+                  "Select local audio, then Play to invoke Root FIFO. Currently first 4 seconds only, not full-song or live-app FIFO. Errors will appear here."):
+                t("兼容模式使用 Android Vibrator；不等于连续 PCM 波形。","Compatibility uses Android Vibrator, not continuous PCM."));
+        }
+        if(playButton!=null && !nativePreviewBusy && (player==null || !player.isPlaying())){
+            playButton.setText(fifoPreferred?t("▶ 播放 FIFO · 前 4 秒","▶ Play FIFO · first 4s"):t("▶ 扬声器 / 兼容振动","▶ Speaker / compat haptics"));
+        }
+        if(playButton!=null)disabled(playButton,file!=null&&!nativePreviewBusy);
+    }
+    private void onPlaybackPressed(){
+        if(fifoPreferred)runContinuousPreview();
+        else playPause();
     }
     private void updateVolumeControls(){
         if(volumeFollowButton!=null){
@@ -329,16 +366,21 @@ public final class MainActivity extends Activity {
         int strength=Math.round(engine.effectiveOutputScale(tune)*25f);
         if(test && strength<1){notifyStatus(t("当前音量联动为静音，未驱动马达","Media volume is muted; no native effect sent"));return;}
         if(fifoStatus!=null)fifoStatus.setText(t("正在调用 Root 原生工具…","Running native tool via Root…"));
+        if(routeStatus!=null)routeStatus.setText(t("正在检测设备权限和 EV_FF…","Checking Root and EV_FF permissions…"));
         new Thread(()->{
             String result=RootFifoTester.run(getApplicationContext(),test,hz,Math.max(1,strength));
             ui.post(()->{
                 if(fifoStatus!=null)fifoStatus.setText(result);
+                if(routeStatus!=null)routeStatus.setText(result);
                 notifyStatus(result.length()>110?result.substring(0,110):result);
             });
         },"fifo-experimental").start();
     }
     private int nativeStrength(){
-        return Math.round(engine.effectiveOutputScale(tune)*25f);
+        float level=engine.effectiveOutputScale(tune);
+        // Keep exact mute, but compensate for quadratic attenuation when both PCM and effect
+        // magnitude are capped. Still limited to <= 22% effect magnitude and <= 48/127 samples.
+        return level<=0f?0:Math.max(1,Math.round(22f*(float)Math.sqrt(level)));
     }
     private void runLongTone(){
         if(nativePreviewBusy || PlaybackCaptureService.running){
@@ -362,6 +404,8 @@ public final class MainActivity extends Activity {
         if(strength<1){notifyStatus(t("媒体音量为零，未启动马达","Media volume muted: no motor output"));return;}
         stop(); // Do not run regular Vibrator pulses concurrently with native FIFO.
         nativePreviewBusy=true;
+        if(routeStatus!=null)routeStatus.setText(t("正在解码并启动原生 FIFO；请查看随后显示的错误或执行结果…","Decoding and starting native FIFO; waiting for actual command status…"));
+        if(playButton!=null){playButton.setText(t("原生 FIFO 运行中…","Native FIFO running…"));disabled(playButton,false);}
         if(continuousPreviewButton!=null){continuousPreviewButton.setText(t("转换并播放中…","Decoding and playing…"));disabled(continuousPreviewButton,false);}
         notifyStatus(t("解码前 4 秒并一次性上传 FIFO…","Decoding first 4s for a single FIFO upload…"));
         Uri selected=file;
@@ -370,8 +414,11 @@ public final class MainActivity extends Activity {
             ui.post(()->{
                 nativePreviewBusy=false;
                 if(continuousPreviewButton!=null){continuousPreviewButton.setText(t("预览 4 秒连续马达音频","Preview 4s continuous motor audio"));disabled(continuousPreviewButton,RootFifoTester.deviceCandidate());}
-                notifyStatus(out);
                 if(fifoStatus!=null)fifoStatus.setText(out);
+                updatePlaybackRoute();
+                // Preserve the exact last output/error rather than replacing it with the generic mode description.
+                if(routeStatus!=null)routeStatus.setText(out);
+                notifyStatus(out);
             });
         },"fifo-continuous-local").start();
     }
@@ -584,8 +631,13 @@ public final class MainActivity extends Activity {
             trackLabel.setText(selectedName==null?t("已选中文件","File selected"):selectedName);
             disabled(playButton,true);
             showTab(1);
-            notifyStatus(t("文件已选择，正在准备播放…","Track selected; preparing playback…"));
-            playPause();
+            updatePlaybackRoute();
+            if(fifoPreferred){
+                notifyStatus(t("FIFO 已选为默认。点击播放启动最多 4 秒连续波形。","FIFO is default. Tap Play for up to four seconds of continuous waveform."));
+            }else{
+                notifyStatus(t("文件已选择，正在准备播放…","Track selected; preparing playback…"));
+                playPause();
+            }
         }else if(req==REQUEST_EXPORT){
             try(java.io.OutputStream stream=getContentResolver().openOutputStream(data.getData())){
                 if(stream!=null)stream.write(capabilityReport().getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -707,7 +759,7 @@ public final class MainActivity extends Activity {
         if(nativeEffect!=null){try{nativeEffect.setEnabled(false);nativeEffect.release();}catch(Exception ignored){}nativeEffect=null;}
         if(player!=null){try{player.reset();player.release();}catch(Exception ignored){}player=null;}
         prepared=false;loading=false;spectrum.setPlaying(false);
-        if(playButton!=null)playButton.setText(t("开始播放","Play"));
+        updatePlaybackRoute();
     }
     private final Runnable volumeTick=new Runnable(){
         @Override public void run(){updateVolumeControls();ui.postDelayed(this,700);}

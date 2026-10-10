@@ -69,9 +69,11 @@ final class RootFifoTester {
             if(!"probe".equals(args))actual+=" "+quote(marker.getAbsolutePath());
             String inner="mkdir -m 0700 "+quote(workdir)+" || exit 6; cp "+quote(source.getAbsolutePath())+" "+quote(executable)
                 +" && chmod 0700 "+quote(executable)+extra+" && "+quote(executable)+" "+actual
-                +"; ret=$?; rm -f "+quote(executable)+" "+quote(remotePcm)+"; rmdir "+quote(workdir)+"; exit $ret";
+                +"; ret=$?; if [ $ret -eq 0 ] && [ "+quote(args)+" != probe ]; then "
+                +" dmesg 2>/dev/null | grep 'qcom-hv-haptics' | tail -8 || true; fi; "
+                +" rm -f "+quote(executable)+" "+quote(remotePcm)+"; rmdir "+quote(workdir)+"; exit $ret";
             process=new ProcessBuilder("/system/bin/sh","-c","su -c "+quote(inner)).redirectErrorStream(true).start();
-            if(!process.waitFor(12,TimeUnit.SECONDS)){
+            if(!process.waitFor(15,TimeUnit.SECONDS)){
                 process.destroyForcibly();return "ERROR: rooted helper timeout. Check kernel log and restart haptics if needed";
             }
             String result=new String(process.getInputStream().readNBytes(8192),StandardCharsets.UTF_8);
