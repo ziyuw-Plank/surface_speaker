@@ -8,6 +8,8 @@
 #include <fcntl.h>
 #include <linux/input.h>
 #include <math.h>
+#include <signal.h>
+#include <sys/stat.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,6 +28,9 @@ struct qcom_fifo_payload {
     uint8_t *data;
 };
 _Static_assert(sizeof(struct qcom_fifo_payload) == 24, "Only 64-bit ABI is supported");
+static volatile sig_atomic_t aborted = 0;
+static const char *stop_marker = NULL;
+static void on_signal(int sig) {(void)sig;aborted=1;}
 static void sleep_ms(int ms) {
     struct timespec tv = { .tv_sec = ms / 1000, .tv_nsec = (ms % 1000) * 1000000L };
     while(nanosleep(&tv, &tv) == -1 && errno == EINTR) {}
@@ -55,43 +60,79 @@ static int open_verified(char *path,size_t cap) {
     }
     return fd;
 }
-int main(int argc,char **argv) {
-    if(argc<2){fprintf(stderr,"Usage: native_fifo_arm64 probe | test <frequency 100..300> <strength 1..25>\n");return 2;}
-    if(strcmp(argv[1],"probe") && strcmp(argv[1],"test")){fprintf(stderr,"ERROR:unknown command\n");return 2;}
-    char path[64];int fd=open_verified(path,sizeof(path));if(fd<0)return 3;
-    if(!strcmp(argv[1],"probe")) {printf("OK:verified %s FF_PERIODIC+FF_CUSTOM, 64-bit ABI candidate (not playback-verified)\n",path);close(fd);return 0;}
-    if(argc!=4){fprintf(stderr,"ERROR:test requires frequency and strength\n");close(fd);return 2;}
-    char *end1,*end2;long hz=strtol(argv[2],&end1,10),level=strtol(argv[3],&end2,10);
-    if(*end1||*end2||hz<100||hz>300||level<1||level>25){fprintf(stderr,"ERROR:range freq 100..300 Hz, strength 1..25%%\n");close(fd);return 2;}
-    /* 24 kHz * 50ms, fits in observed 2048-byte FIFO. Signed 8-bit PCM. */
-    enum { SAMPLE_RATE=24000, SAMPLES=1200 };
-    uint8_t samples[SAMPLES];
-    for(int i=0;i<SAMPLES;i++) {
-        double env=fmin(1.,fmin((double)i/180.,(SAMPLES-i-1)/180.));
-        /* The PCM buffer is capped independently of the driver magnitude. */
-        int value=(int)lrint(27.0*env*sin(2*M_PI*(double)hz*i/SAMPLE_RATE));
-        samples[i]=(uint8_t)(int8_t)value;
+/* One upload drives one long FIFO effect; the kernel refills its 2048-byte FIFO via IRQ.
+ * Never repeatedly submit short FF events to simulate audio. */
+static int play_fifo(int fd, const char *path, uint8_t *data, int samples, int strength){
+    if(samples<2400 || samples>96000 || strength<1 || strength>25)return 2;
+    // Cap ALL sample bytes, including a file supplied by a privileged caller.
+    for(int i=0;i<samples;i++){
+        int v=(int)(int8_t)data[i];
+        if(v>24)v=24;if(v< -24)v=-24;
+        int fade=i<960?i:(samples-1-i<960?samples-1-i:960);
+        if(fade<0)fade=0;
+        v=v*fade/960;
+        data[i]=(uint8_t)(int8_t)v;
     }
-    struct qcom_fifo_payload payload={.idx=0,.length=SAMPLES,.play_rate_hz=SAMPLE_RATE,.data=samples};
+    struct qcom_fifo_payload payload={.idx=0,.length=(uint32_t)samples,.play_rate_hz=24000,.data=data};
     struct ff_effect effect;memset(&effect,0,sizeof(effect));
     effect.type=FF_PERIODIC;effect.id=-1;
-    effect.replay.length=60;
+    effect.replay.length=(uint16_t)(samples/24+150);
     effect.u.periodic.waveform=FF_CUSTOM;
-    effect.u.periodic.magnitude=(uint16_t)((32767L*level)/100L);
-    /* Matches vendor ABI: custom_len is checked against sizeof(struct custom_fifo_data). */
+    effect.u.periodic.magnitude=(uint16_t)((32767L*strength)/100L);
     effect.u.periodic.custom_len=sizeof(payload);
     effect.u.periodic.custom_data=(int16_t*)&payload;
-    if(ioctl(fd,EVIOCSFF,&effect)<0){fprintf(stderr,"ERROR:EVIOCSFF: %s\n",strerror(errno));close(fd);return 4;}
+    if(ioctl(fd,EVIOCSFF,&effect)<0){fprintf(stderr,"ERROR:EVIOCSFF: %s\n",strerror(errno));return 4;}
     struct input_event ev;memset(&ev,0,sizeof(ev));ev.type=EV_FF;ev.code=effect.id;ev.value=1;
-    if(write(fd,&ev,sizeof(ev))!=(ssize_t)sizeof(ev)) {
-        fprintf(stderr,"ERROR:start write: %s\n",strerror(errno));ioctl(fd,EVIOCRMFF,effect.id);close(fd);return 5;
+    if(write(fd,&ev,sizeof(ev))!=(ssize_t)sizeof(ev)){
+        fprintf(stderr,"ERROR:start write: %s\n",strerror(errno));ioctl(fd,EVIOCRMFF,effect.id);return 5;
     }
-    sleep_ms(62);
-    ev.value=0;
-    (void)write(fd,&ev,sizeof(ev));
-    sleep_ms(14);
+    int total=samples/24+60;
+    for(int elapsed=0;elapsed<total && !aborted;elapsed+=25){
+        if(stop_marker && access(stop_marker,F_OK)==0){aborted=1;break;}
+        sleep_ms(25);
+    }
+    ev.value=0;(void)write(fd,&ev,sizeof(ev));
+    sleep_ms(25);
     (void)ioctl(fd,EVIOCRMFF,effect.id);
-    close(fd);
-    printf("OK:sent 50ms/24kHz custom FIFO effect at %ld Hz; requested magnitude=%ld%%; physical output not measured\n",hz,level);
-    return 0;
+    printf("OK:%s single FIFO upload %d samples (%.2fs), 24kHz, magnitude %d%%; physical waveform not measured\n",
+        path,samples,samples/24000.0,strength);
+    return aborted?130:0;
+}
+int main(int argc,char **argv){
+    if(argc<2){fprintf(stderr,"Usage: fifo probe | test <hz> <strength> | long-tone <hz> <strength> | play-file <raw> <strength>\n");return 2;}
+    signal(SIGINT,on_signal);signal(SIGTERM,on_signal);
+    char path[64];int fd=open_verified(path,sizeof(path));if(fd<0)return 3;
+    if(!strcmp(argv[1],"probe")){printf("OK: %s FF_PERIODIC+FF_CUSTOM advertised (no actual playback confirmed)\n",path);close(fd);return 0;}
+    int tone=!strcmp(argv[1],"test")||!strcmp(argv[1],"long-tone");
+    int file=!strcmp(argv[1],"play-file");
+    if(!tone && !file){fprintf(stderr,"ERROR:unknown command\n");close(fd);return 2;}
+    if(argc!=4 && argc!=5){fprintf(stderr,"ERROR:expected 2 parameters and optional stop marker\n");close(fd);return 2;}
+    if(argc==5)stop_marker=argv[4];
+    char *end=NULL;long strength=strtol(argv[3],&end,10);
+    if(*end || strength<1 || strength>25){fprintf(stderr,"ERROR:strength must be 1..25%%\n");close(fd);return 2;}
+    uint8_t *samples=NULL;int n=0;
+    if(tone){
+        end=NULL;long hz=strtol(argv[2],&end,10);
+        if(*end||hz<100||hz>300){fprintf(stderr,"ERROR:frequency 100..300 Hz\n");close(fd);return 2;}
+        n=!strcmp(argv[1],"test")?1200:48000;
+        samples=calloc(n,1);if(!samples){close(fd);return 3;}
+        for(int i=0;i<n;i++){
+            int v=(int)lrint(24.0*sin(2*M_PI*(double)hz*i/24000.0));
+            samples[i]=(uint8_t)(int8_t)v;
+        }
+    }else{
+        const char *filename=argv[2];
+        struct stat st;
+        if(stat(filename,&st)<0||!S_ISREG(st.st_mode)||st.st_size<2400||st.st_size>96000){
+            fprintf(stderr,"ERROR:PCM file must be 0.1-4.0s at 24kHz signed 8-bit\n");close(fd);return 2;
+        }
+        n=(int)st.st_size;samples=malloc(n);
+        if(!samples){close(fd);return 3;}
+        int in=open(filename,O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+        if(in<0){perror("PCM open");free(samples);close(fd);return 3;}
+        int readTotal=0;while(readTotal<n){ssize_t got=read(in,samples+readTotal,n-readTotal);if(got<=0)break;readTotal+=(int)got;}
+        close(in);if(readTotal!=n){fprintf(stderr,"ERROR:short PCM file\n");free(samples);close(fd);return 3;}
+    }
+    int rc=play_fifo(fd,argv[1],samples,n,(int)strength);
+    free(samples);close(fd);return rc;
 }
