@@ -134,17 +134,22 @@ static int do_tone(void){
 static int do_live(int n){
     if(n!=1152 && n!=1440 && n!=2304){fprintf(stderr,"ERROR:unsupported block\n");return 2;}
     int8_t *samples=malloc((size_t)n);if(!samples)return 4;
-    unsigned cursor=0;int batches=0;uint64_t start=millis();
+    unsigned cursor=0;int batches=0;float sustained=0.0f;
     setvbuf(stdout,NULL,_IOLBF,0);
-    puts("READY: RichTap mmap 16KiB streaming experimental; 20s session cap");
+    puts("READY: RichTap mmap stream opened; auto fallback on playback faults");
     while(!stopping()){
-        if(millis()-start>20000){fprintf(stderr,"LIMIT: 20s experimental RichTap session; use FF_CUSTOM for normal capture\n");break;}
         unsigned char strength;
         if(fread(&strength,1,1,stdin)!=1)break;
         if(fread(samples,1,(size_t)n,stdin)!=(size_t)n){fprintf(stderr,"ERROR:short PCM block\n");free(samples);return 8;}
         if(strength>56){fprintf(stderr,"ERROR:strength >56\n");free(samples);return 8;}
         uint64_t ts=millis();
-        int out_strength=(int)strength*65/56; /* maximum 65% byte scaling; capped MAX_AMP */
+        // Conservative rolling energy budget without arbitrary 20 s playback cutoff.
+        float energy=0.0f;
+        for(int i=0;i<n;i++){float x=(float)samples[i]/92.0f;energy+=x*x;}
+        sustained=0.996f*sustained+0.004f*(energy/n)*((float)strength/56.0f);
+        float derate=sustained>0.20f?fmaxf(0.55f,1.0f-(sustained-0.20f)*1.4f):1.0f;
+        int out_strength=(int)lrintf((float)strength*65.0f/56.0f*derate);
+        /* MAX_AMP still limits each physical waveform byte. */
         int rc=queue_samples(samples,(size_t)n,&cursor,out_strength,ts+180);
         if(rc){free(samples);return rc==-2?0:9;}
         if(!stream_started && begin_stream()!=0){free(samples);return 10;}
