@@ -64,9 +64,6 @@ public final class MainActivity extends Activity {
     private boolean nativePreviewBusy=false;
     // Preferred local playback engine. Native FIFO is an explicit 4-second preview, not full-track streaming.
     private boolean fifoPreferred=false;
-    private boolean richTapExperiment=false;
-    private TextView richTapStatus;
-    private Button richTapSwitch;
     private Button fifoRouteButton;
     private TextView routeStatus;
     private Button continuousPreviewButton;
@@ -101,7 +98,6 @@ public final class MainActivity extends Activity {
         updateCapabilityButtons();
         PlaybackCaptureService.updateTune(tune);
         PlaybackCaptureService.setNativeRoute(fifoPreferred);
-        PlaybackCaptureService.setRichTapExperiment(richTapExperiment);
     }
     private void loadPrefs(){
         android.content.SharedPreferences p=getSharedPreferences("tune",MODE_PRIVATE);
@@ -120,8 +116,6 @@ public final class MainActivity extends Activity {
         useEnvelope=p.getBoolean("envelope",true);
         useNative=p.getBoolean("native",false);
         fifoPreferred=p.getBoolean("prefer_fifo",RootFifoTester.deviceCandidate());
-        // Auto-try RichTap on the specifically checked device. Fallback is mandatory.
-        richTapExperiment=p.getBoolean("richtap_auto",RootFifoTester.deviceCandidate());
     }
     private void savePrefs(){getSharedPreferences("tune",MODE_PRIVATE).edit()
         .putInt("preset",preset).putInt("gain",tune.gain).putInt("detail",tune.detail).putInt("bassClean",tune.bassClean).putInt("trebleStable",tune.trebleStable).putInt("liveFrameMs",tune.liveFrameMs)
@@ -130,7 +124,7 @@ public final class MainActivity extends Activity {
         .putInt("freq",tune.frequency).putInt("speaker",tune.speaker)
         .putBoolean("envelope",useEnvelope).putBoolean("native",useNative)
         .putInt("volumeRatio",tune.volumeRatio).putBoolean("followVolume",tune.followVolume)
-        .putBoolean("prefer_fifo",fifoPreferred).putBoolean("richtap_auto",richTapExperiment).apply();}
+        .putBoolean("prefer_fifo",fifoPreferred).apply();}
     private int d(float size){return (int)(size*getResources().getDisplayMetrics().density+0.5f);}
     private GradientDrawable background(int color,int radius){GradientDrawable b=new GradientDrawable();b.setColor(color);b.setCornerRadius(d(radius));return b;}
     private TextView text(String s,int sp,int color,boolean bold){
@@ -162,7 +156,7 @@ public final class MainActivity extends Activity {
         LinearLayout top=row();top.setPadding(d(20),d(15),d(20),d(8));
         TextView brand=text("S / S",18,ACCENT,true);brand.setLetterSpacing(.18f);top.addView(brand);
         TextView heading=text("  SURFACE SPEAKER",17,TEXT,true);top.addView(heading);
-        TextView version=text("  v0.15",11,MUTED,false);top.addView(version);
+        TextView version=text("  v0.13",11,MUTED,false);top.addView(version);
         shell.addView(top,lp(-1,54));
         FrameLayout frame=new FrameLayout(this);shell.addView(frame,new LinearLayout.LayoutParams(-1,0,1));
         for(int i=0;i<4;i++){
@@ -288,24 +282,6 @@ public final class MainActivity extends Activity {
                 envelopeButton.setOnClickListener(v->{useEnvelope=!useEnvelope;savePrefs();updateCapabilityButtons();});
                 nativeButton=subtle("");LinearLayout.LayoutParams nr=lp(-1,48);nr.topMargin=d(8);routes.addView(nativeButton,nr);
                 nativeButton.setOnClickListener(v->{useNative=!useNative;savePrefs();updateCapabilityButtons();});
-                richTapSwitch=subtle(t("实时捕获：自动 RichTap","Live: Auto RichTap"));
-                LinearLayout.LayoutParams rl=lp(-1,51);rl.topMargin=d(9);routes.addView(richTapSwitch,rl);
-                richTapSwitch.setOnClickListener(v->{
-                    if(PlaybackCaptureService.running || nativePreviewBusy){notifyStatus(t("请先停止播放与捕获","Stop native capture/playback first"));return;}
-                    if(richTapExperiment){richTapExperiment=false;savePrefs();PlaybackCaptureService.setRichTapExperiment(false);updateRichTapSwitch();return;}
-                    new AlertDialog.Builder(this)
-                        .setTitle(t("自动 RichTap 实时输出","Auto RichTap live output"))
-                        .setMessage(t("本机优先使用 RichTap 共享缓冲；驱动拒绝或超时则自动切至 FF_CUSTOM，再失败切 Android 兼容模式。尚无实机安全或温度校准，保留原生幅度限制与负载降幅。异常发热或噪声请立即停止。", 
-                            "Try RichTap first; fall back to FF_CUSTOM then Android haptics on errors. Hardware safety/temperature is not calibrated. Gain is bounded and sustained output derated. Stop on unusual heat or noise."))
-                        .setNegativeButton(t("取消","Cancel"),null)
-                        .setPositiveButton(t("开启实验模式","Enable experiment"),(dlg,w)->{
-                            richTapExperiment=true;fifoPreferred=true;savePrefs();
-                            PlaybackCaptureService.setNativeRoute(true);
-                            PlaybackCaptureService.setRichTapExperiment(true);
-                            updateRichTapSwitch();updateDashboard();
-                        }).show();
-                });
-                updateRichTapSwitch();
             }else{
                 TextView title=text(t("设备诊断","DIAGNOSTICS"),22,TEXT,true);page.addView(title);
                 LinearLayout probe=card(page);
@@ -352,25 +328,6 @@ public final class MainActivity extends Activity {
                                   "One 2-second sine-wave effect. Kernel IRQ refills FIFO; capped magnitude and automatic stop. Requires Root."))
                     .setNegativeButton(t("取消","Cancel"),null)
                     .setPositiveButton(t("确认测试","Confirm"),(dialog,which)->runLongTone()).show());
-                LinearLayout richtap=card(page);
-                header(richtap,t("RichTap mmap · v0.15 工具","RICHTAP MMAP · v0.15"),
-                    t("根据当前手机厂商库与内核模块逆向，16 KiB 环形缓冲。未经过设备实测；请先只读检查再试短音。", 
-                      "16KiB ring reconstructed from uploaded vendor binaries. Not yet verified on the physical device. Probe first."));
-                richTapStatus=text(t("未执行测试","Not yet tested"),12,MUTED,false);
-                richTapStatus.setTextIsSelectable(true);richtap.addView(richTapStatus);
-                Button rpProbe=subtle(t("只读 RichTap 设备检查","Read-only RichTap device probe"));
-                LinearLayout.LayoutParams rpp=lp(-1,46);rpp.topMargin=d(8);richtap.addView(rpProbe,rpp);
-                disabled(rpProbe,RootFifoTester.deviceCandidate());
-                rpProbe.setOnClickListener(v->runRichTap(false));
-                Button rpTone=subtle(t("测试 0.35 秒 · 200 Hz · 低幅度","Test 0.35s · 200Hz · LOW level"));
-                LinearLayout.LayoutParams rpt=lp(-1,47);rpt.topMargin=d(8);richtap.addView(rpTone,rpt);
-                disabled(rpTone,RootFifoTester.deviceCandidate());
-                rpTone.setOnClickListener(v->new AlertDialog.Builder(this)
-                    .setTitle(t("未验证的 RichTap 驱动接口","Unverified RichTap driver interface"))
-                    .setMessage(t("此测试将 mmap 16KiB 并发送 STREAM_MODE ioctl，马达可能运动 0.35 秒。低幅度，驱动仍可能异常；只有已知机型才可运行。建议关闭其它振动应用。", 
-                                  "This maps a 16KiB buffer and sends STREAM_MODE ioctl. The motor may vibrate for 0.35s. ABI is not hardware-tested; close other haptic apps."))
-                    .setNegativeButton(t("取消","Cancel"),null)
-                    .setPositiveButton(t("执行测试","Run test"),(dlg,w)->runRichTap(true)).show());
                 Button export=subtle(t("导出驱动报告","Export diagnostics"));LinearLayout.LayoutParams et=lp(-1,48);et.topMargin=d(8);probe.addView(export,et);export.setOnClickListener(v->exportReport());
                 message=text(t("本应用不会更改 AVB、SELinux 或系统分区。","No changes to AVB, SELinux or system partitions."),12,MUTED,false);
                 message.setTextIsSelectable(true);message.setPadding(0,d(14),0,0);probe.addView(message);
@@ -507,24 +464,8 @@ public final class MainActivity extends Activity {
             dock[i].setTextColor(i==which?BACK:TEXT);
         }
     }
-    private void updateRichTapSwitch(){
-        if(richTapSwitch!=null)richTapSwitch.setText(richTapExperiment?
-            t("实时捕获：优先 RichTap（失败自动回退）","Live capture: RichTap first (auto fallback)"):
-            t("实时捕获：仅 FF_CUSTOM","Live capture: FF_CUSTOM only"));
-    }
-    private void runRichTap(boolean tone){
-        if(PlaybackCaptureService.running || nativePreviewBusy){notifyStatus(t("请先停止捕获","Stop capture first"));return;}
-        if(richTapStatus!=null)richTapStatus.setText(t("Root 设备检查中…","Running rooted RichTap test…"));
-        new Thread(()->{
-            String result=tone?RootFifoTester.richTapTone(getApplicationContext()):RootFifoTester.richTapProbe(getApplicationContext());
-            ui.post(()->{if(richTapStatus!=null)richTapStatus.setText(result);notifyStatus(result);});
-        },"richtap-experiment").start();
-    }
     private void startCapture(){
-        requestingCapture=true;
-        PlaybackCaptureService.setNativeRoute(fifoPreferred);
-        PlaybackCaptureService.setRichTapExperiment(richTapExperiment);
-        updateDashboard();
+        requestingCapture=true;PlaybackCaptureService.setNativeRoute(fifoPreferred);updateDashboard();
         if(!engine.features.present){requestingCapture=false;updateDashboard();notifyStatus(t("马达不可用","Vibrator unavailable"));return;}
         if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){
             pendingCapture=true;requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},REQUEST_RECORD);return;
@@ -549,9 +490,9 @@ public final class MainActivity extends Activity {
             captureButton.setAlpha(requestingCapture && !live?0.72f:1f);
         }
         if(captureStatus!=null){
-            captureStatus.setText(live?"● "+PlaybackCaptureService.activeBackend+" · "+PlaybackCaptureService.activeFrameMs+"ms":
-                requestingCapture?t("等待音频权限与系统同意","Waiting for system consent"):
-                t("实时捕获未激活","Live capture inactive"));
+            captureStatus.setText(live?(fifoPreferred?t("● FIFO 捕获 · ","● FIFO capturing · ")+PlaybackCaptureService.activeFrameMs+"ms":t("● Android 兼容捕获","● Android compatibility capture"))
+                :requestingCapture?t("等待音频权限与系统同意","Waiting for system consent")
+                :t("实时捕获未激活","Live capture inactive"));
             captureStatus.setTextColor(live?ACCENT:MUTED);
         }
         if(authorization!=null){
@@ -878,8 +819,6 @@ public final class MainActivity extends Activity {
             @Override public void onCaptureState(String status,boolean active){
                 requestingCapture=false;notifyStatus(status);updateDashboard();
                 if(!active&&spectrum!=null&&player==null)spectrum.setPlaying(false);
-                if(!active&&captureStatus!=null&&status.startsWith("Capture ended:"))
-                    captureStatus.setText(status);
             }
         };
         if(engine!=null)updateCapabilityButtons();updateVolumeControls();

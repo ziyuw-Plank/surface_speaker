@@ -36,10 +36,7 @@ public final class PlaybackCaptureService extends Service {
     static volatile int nativeDropped;
     static volatile int nativeProcessingMs;
     static volatile int activeFrameMs;
-    static volatile boolean richTapExperiment;
-    static volatile String activeBackend="Idle";
     static void setNativeRoute(boolean requested){preferNativeFifo=requested;}
-    static void setRichTapExperiment(boolean enabled){richTapExperiment=enabled;}
 
     private static volatile HapticEngine.Tune settings=HapticEngine.preset(0);
     static void updateTune(HapticEngine.Tune tune){settings=tune.copy();}
@@ -51,7 +48,6 @@ public final class PlaybackCaptureService extends Service {
     private HapticEngine motor;
     private volatile RootFifoTester.LiveSession liveSession;
     private volatile String stopError;
-    private volatile boolean shuttingDown;
 
     private void state(String s,boolean active){
         handler.post(()->{Listener l=listener;if(l!=null)l.onCaptureState(s,active);});
@@ -61,7 +57,7 @@ public final class PlaybackCaptureService extends Service {
         if(intent==null)return START_NOT_STICKY;
         if(STOP.equals(intent.getAction())){shutdown();stopSelf();return START_NOT_STICKY;}
         if(!START.equals(intent.getAction()))return START_NOT_STICKY;
-        stopError=null;shuttingDown=false;
+        stopError=null;
         if(active.get()){state("Already capturing",true);return START_NOT_STICKY;}
         try {
             NotificationManager nm=getSystemService(NotificationManager.class);
@@ -83,10 +79,7 @@ public final class PlaybackCaptureService extends Service {
             projection=manager.getMediaProjection(code,data);
             if(projection==null)throw new IllegalStateException("Projection unavailable");
             projection.registerCallback(new MediaProjection.Callback(){
-                @Override public void onStop(){
-                    if(shuttingDown || !active.get())return;
-                    stopError="Android revoked playback-capture permission";shutdown();stopSelf();
-                }
+                @Override public void onStop(){stopError="Android ended audio capture permission";shutdown();stopSelf();}
             },handler);
             AudioPlaybackCaptureConfiguration capture=new AudioPlaybackCaptureConfiguration.Builder(projection)
                 .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
@@ -110,8 +103,7 @@ public final class PlaybackCaptureService extends Service {
     }
     private void captureLoop(int sampleRate){
         AudioAnalysis fft=new AudioAnalysis();short[] pcm=new short[512];long lastUi=0;
-        boolean nativeMode=preferNativeFifo && RootFifoTester.deviceCandidate();
-        boolean richTapMode=nativeMode && richTapExperiment;
+        final boolean nativeMode=preferNativeFifo && RootFifoTester.deviceCandidate();
         // 48ms response (more restarts), 60ms balanced, 96ms smoother (more latency).
         final int frameMs=settings.liveFrameMs==96?96:settings.liveFrameMs==60?60:48;
         final int frameSamples=frameMs*24;
@@ -119,31 +111,15 @@ public final class PlaybackCaptureService extends Service {
         nativeBlocks=0;nativeDropped=0;nativeProcessingMs=0;activeFrameMs=frameMs;
         if(nativeMode){
             try{
-                liveSession=RootFifoTester.openLive(this,frameSamples,richTapMode);
-                activeBackend=richTapMode?"RichTap mmap":"FF_CUSTOM";
+                liveSession=RootFifoTester.openLive(this,frameSamples);
                 motor.setEnabled(false);
-                routeMessage=activeBackend+" live capture";
-            }catch(Exception first){
-                if(richTapMode){
-                    richTapMode=false;
-                    try{
-                        liveSession=RootFifoTester.openLive(this,frameSamples,false);
-                        activeBackend="FF_CUSTOM fallback";
-                        routeMessage="RichTap startup failed ("+first.getMessage()+"); using FF_CUSTOM";
-                        motor.setEnabled(false);
-                    }catch(Exception second){
-                        nativeMode=false;liveSession=null;activeBackend="Android compatibility";
-                        routeMessage="Native startup failed: RichTap="+first.getMessage()+" / FIFO="+second.getMessage()+"; Android fallback";
-                        motor.setEnabled(true);
-                    }
-                }else{
-                    nativeMode=false;liveSession=null;activeBackend="Android compatibility";
-                    routeMessage="FF_CUSTOM startup failed: "+first.getMessage()+"; Android fallback";
-                    motor.setEnabled(true);
-                }
+                routeMessage="Native FIFO "+frameMs+"ms chunks; FF_CUSTOM restarts between effects";
+                state(routeMessage,true);
+            }catch(Exception e){
+                routeMessage="Native FIFO unavailable: "+e.getMessage();
+                stopError=routeMessage;shutdown();stopSelf();return;
             }
-        }else{activeBackend="Android compatibility";routeMessage="Android Haptics compatibility";}
-        state(routeMessage,true);
+        }else{routeMessage="Android Haptics compatibility";}
 
         int silent=0;
         while(active.get()){
@@ -169,28 +145,7 @@ public final class PlaybackCaptureService extends Service {
                         nativeBlocks=session.frames();nativeDropped=session.dropped();nativeProcessingMs=session.nativeDurationMs();
                         if(!session.alive())throw new IllegalStateException(session.recentLog());
                     });
-                }catch(Exception e){
-                    String error=e.getClass().getSimpleName()+": "+e.getMessage();
-                    RootFifoTester.LiveSession failed=liveSession;liveSession=null;
-                    if(failed!=null)failed.close();
-                    if(richTapMode){
-                        richTapMode=false;
-                        try{
-                            liveSession=RootFifoTester.openLive(this,frameSamples,false);
-                            activeBackend="FF_CUSTOM fallback";
-                            routeMessage="RichTap streaming failed ("+error+"); switched to FF_CUSTOM";
-                        }catch(Exception fail){
-                            nativeMode=false;activeBackend="Android compatibility";
-                            routeMessage="RichTap/FF_CUSTOM unavailable ("+error+"; "+fail.getMessage()+"); Android fallback";
-                            motor.setEnabled(true);
-                        }
-                    }else{
-                        nativeMode=false;activeBackend="Android compatibility";
-                        motor.setEnabled(true);
-                        routeMessage="FF_CUSTOM stopped ("+error+"); Android fallback";
-                    }
-                    state(routeMessage,true);
-                }
+                }catch(Exception e){routeMessage="Native FIFO streaming error: "+e.getMessage();stopError=routeMessage;break;}
             }else motor.onPcm(pcm,count,sampleRate,settings);
             long now=android.os.SystemClock.uptimeMillis();
             if(now-lastUi>85){
@@ -207,7 +162,6 @@ public final class PlaybackCaptureService extends Service {
     }
     private synchronized void shutdown(){
         if(!active.getAndSet(false)&&recorder==null&&projection==null)return;
-        shuttingDown=true;
         running=false;
         if(motor!=null)motor.setEnabled(false);
         RootFifoTester.LiveSession session=liveSession;liveSession=null;
@@ -216,8 +170,7 @@ public final class PlaybackCaptureService extends Service {
         if(r!=null){try{r.stop();}catch(Exception ignored){}try{r.release();}catch(Exception ignored){}}
         MediaProjection p=projection;projection=null;
         if(p!=null)try{p.stop();}catch(Exception ignored){}
-        activeBackend="Idle";
-        state(stopError==null?"Capture stopped by user":"Capture ended: "+stopError,false);
+        state(stopError==null?"Capture stopped by user or service":"Capture ended: "+stopError,false);
     }
     @Override public void onDestroy(){shutdown();super.onDestroy();}
     @Override public IBinder onBind(Intent i){return null;}
