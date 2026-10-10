@@ -24,11 +24,15 @@ final class ProbeCommands {
         "if [ -r /proc/bus/input/devices ]; then grep -iE 'vib|haptic|awinic' /proc/bus/input/devices | head -30; fi",
         "echo '[report end]'"
     );
+    private static String quote(String value) { return "'" + value.replace("'", "'\"'\"'") + "'"; }
     static String execute(boolean root) {
         Process p = null;
         try {
             // Only fixed application-controlled commands. No arbitrary user input.
-            p = new ProcessBuilder(root ? "su" : "/system/bin/sh", "-c", SCRIPT)
+            // Some KernelSU / vendor setups reject direct exec("su") even if the app is authorized.
+            // Start through Android's system shell, retaining the exact error for diagnosis.
+            String command = root ? "su -c " + quote(SCRIPT) : SCRIPT;
+            p = new ProcessBuilder("/system/bin/sh", "-c", command)
                     .redirectErrorStream(true).start();
             StringBuilder out = new StringBuilder();
             long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(12);
@@ -43,7 +47,8 @@ final class ProbeCommands {
             if (!p.waitFor(1, TimeUnit.SECONDS)) p.destroyForcibly();
             return "exit=" + p.exitValue() + "\n" + out;
         } catch (Exception e) {
-            return e.getClass().getSimpleName() + ": " + e.getMessage();
+            return "root=" + root + "\n" + e.getClass().getSimpleName() + ": " + e.getMessage()
+                + "\nCheck KernelSU authorization for package dev.surfacespeaker.lab03.";
         } finally { if (p != null && p.isAlive()) p.destroyForcibly(); }
     }
 }

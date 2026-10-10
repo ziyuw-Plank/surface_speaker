@@ -19,18 +19,22 @@ final class HapticEngine {
         String vendorName;
     }
     static final class Tune {
-        int gain = 32, bass=55, gate=20, smoothing=55, pulse=35, frequency=130, speaker=35;
+        int gain = 62, bass=68, gate=6, smoothing=35, pulse=48, frequency=130, speaker=55;
         Tune copy() {Tune t=new Tune();t.gain=gain;t.bass=bass;t.gate=gate;t.smoothing=smoothing;t.pulse=pulse;t.frequency=frequency;t.speaker=speaker;return t;}
     }
     static Tune preset(int i) {
         Tune t=new Tune();
-        if(i==1){t.gain=42;t.bass=82;t.gate=18;t.smoothing=62;t.pulse=48;}
-        if(i==2){t.gain=25;t.bass=35;t.gate=28;t.smoothing=28;t.pulse=25;}
+        if(i==1){t.gain=68;t.bass=86;t.gate=5;t.smoothing=42;t.pulse=55;}
+        if(i==2){t.gain=54;t.bass=40;t.gate=5;t.smoothing=20;t.pulse=35;}
         return t;
     }
     final Vibrator motor;
     final Features features=new Features();
     private long lastPulse, totalMotionSince;
+    private int outputPulses;
+    private String lastOutputError="";
+    int pulseCount(){return outputPulses;}
+    String lastError(){return lastOutputError;}
     private float smooth;
     private boolean enabled;
     HapticEngine(Context context) {
@@ -63,21 +67,18 @@ final class HapticEngine {
     void onAudio(float rms,float bass,Tune t, boolean envelopeEnabled) {
         if(!enabled||!features.present)return;
         long now=SystemClock.uptimeMillis();
-        float combined=0.35f*rms+0.65f*(bass*(0.35f+t.bass/100f));
-        float alpha=0.09f+(100-t.smoothing)/100f*0.44f;
+        float combined=Math.min(1, 0.46f*rms + 0.54f*bass*(0.5f+t.bass/100f));
+        float alpha=0.19f+(100-t.smoothing)/100f*0.4f;
         smooth+=alpha*(combined-smooth);
-        float gate=t.gate/100f*0.55f;
+        float gate=t.gate/100f*0.25f;
         if(smooth<gate)return;
-        // A capped output to avoid continuous high-energy stress. Lower than maximum drive.
-        float intensity=Math.min(0.64f, Math.max(0, (smooth-gate)*1.9f*t.gain/100f));
-        if(intensity<0.045f)return;
-        long pulse=Math.min(65,Math.max(20,t.pulse));
-        // 60 ms refractory; avoid stacking, overdriving and rapid binder churn.
-        if(now-lastPulse<Math.max(65,pulse+24))return;
-        // Pause after a sustained 8 s modulation period, so repeated pulses don't run indefinitely.
-        if(totalMotionSince==0) totalMotionSince=now;
-        if(now-totalMotionSince>8_000L) {
-            if(now-totalMotionSince<8_500L)return;
+        // Sensible signal-dependent intensity, large enough to feel while remaining capped.
+        float intensity=Math.min(.67f, Math.max(.12f, (.18f+smooth*1.35f)*(t.gain/100f)));
+        long pulse=Math.min(65,Math.max(25,t.pulse));
+        if(now-lastPulse<Math.max(95,pulse+40))return;
+        if(totalMotionSince==0)totalMotionSince=now;
+        if(now-totalMotionSince>8_000L){
+            if(now-totalMotionSince<8_450L)return;
             totalMotionSince=now;
         }
         lastPulse=now;
@@ -90,9 +91,11 @@ final class HapticEngine {
                     .addControlPoint(intensity, f, half)
                     .addControlPoint(0f, f, half).build());
             }else if(features.amplitude){
-                motor.vibrate(VibrationEffect.createOneShot(pulse,Math.max(1,(int)(255*intensity))));
-            }else if(intensity>0.2f) motor.vibrate(VibrationEffect.createOneShot(pulse,VibrationEffect.DEFAULT_AMPLITUDE));
-        }catch(RuntimeException ignored) { }
+                motor.vibrate(VibrationEffect.createOneShot(pulse,Math.min(175,Math.max(30,Math.round(255*intensity)))));
+            }else motor.vibrate(VibrationEffect.createOneShot(pulse,VibrationEffect.DEFAULT_AMPLITUDE));
+            outputPulses++;
+            lastOutputError="";
+        }catch(RuntimeException e){lastOutputError=e.getClass().getSimpleName()+": "+e.getMessage();}
     }
     void test(Tune t,boolean envelopePreferred){
         if(!features.present)return;
@@ -102,7 +105,7 @@ final class HapticEngine {
                 long seg=Math.max(50,features.minSegmentMs);
                 motor.vibrate(new VibrationEffect.WaveformEnvelopeBuilder()
                     .addControlPoint(0.12f,f,seg).addControlPoint(0,f,seg).build());
-            }else motor.vibrate(VibrationEffect.createOneShot(80,features.amplitude?28:VibrationEffect.DEFAULT_AMPLITUDE));
-        }catch(Exception ignored){}
+            }else motor.vibrate(VibrationEffect.createOneShot(140,features.amplitude?110:VibrationEffect.DEFAULT_AMPLITUDE));
+        }catch(Exception e){lastOutputError=e.getClass().getSimpleName()+": "+e.getMessage();}
     }
 }

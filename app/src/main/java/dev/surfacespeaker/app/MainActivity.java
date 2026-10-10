@@ -14,6 +14,9 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.media.AudioAttributes;
+import android.media.projection.MediaProjectionManager;
+import android.provider.OpenableColumns;
+import android.database.Cursor;
 import android.media.MediaPlayer;
 import android.media.audiofx.HapticGenerator;
 import android.media.audiofx.Visualizer;
@@ -36,7 +39,7 @@ import java.util.Locale;
 import rikka.shizuku.Shizuku;
 
 public final class MainActivity extends Activity {
-    private static final int REQUEST_FILE=91,REQUEST_RECORD=92,REQUEST_EXPORT=93,REQUEST_SHIZUKU=94;
+    private static final int REQUEST_FILE=91,REQUEST_RECORD=92,REQUEST_EXPORT=93,REQUEST_SHIZUKU=94,REQUEST_CAPTURE=95;
     private static final int BACK=0xff111410, PANEL=0xff1d231a, TEXT=0xffeef2e8;
     private static final int MUTED=0xffabb5a4, DISABLED=0xff64705e, ACCENT=0xffc9fb74;
     private final Handler ui=new Handler(Looper.getMainLooper());
@@ -50,9 +53,12 @@ public final class MainActivity extends Activity {
     private Uri file;
     private String report="";
     private String selectedName="";
-    private boolean prepared, loading, running, useEnvelope=true, useNative=false;
+    private boolean prepared, loading, running, useEnvelope=true, useNative=false, pendingCapture=false, rootAuthorized=false;
     private int preset=0;
-    private TextView message, trackLabel, statusLabel, presetLabel;
+    private TextView message, trackLabel, statusLabel, presetLabel, authorization, inputStatus, motorStatus, captureStatus;
+    private Button captureButton;
+    private final ScrollView[] sections=new ScrollView[4];
+    private final Button[] dock=new Button[4];
     private Button playButton, envelopeButton, nativeButton, shizukuButton;
     private final Button[] presetButtons=new Button[4];
     private final java.util.ArrayList<SeekBar> tuneBars=new java.util.ArrayList<>();
@@ -78,6 +84,7 @@ public final class MainActivity extends Activity {
         buildUi();
         Shizuku.addRequestPermissionResultListener(shizukuPermissionListener);
         updateCapabilityButtons();
+        PlaybackCaptureService.updateTune(tune);
     }
     private void loadPrefs(){
         android.content.SharedPreferences p=getSharedPreferences("tune",MODE_PRIVATE);
@@ -125,85 +132,145 @@ public final class MainActivity extends Activity {
         if(summary!=null){TextView sub=text(summary,12,MUTED,false);sub.setPadding(0,d(4),0,d(12));parent.addView(sub);}
     }
     private void buildUi(){
-        ScrollView scroller=new ScrollView(this);scroller.setBackgroundColor(BACK);scroller.setFillViewport(true);
-        LinearLayout page=column();page.setPadding(d(20),d(25),d(20),d(38));scroller.addView(page);
-        TextView logo=text("S / S",15,ACCENT,true);logo.setLetterSpacing(.3f);page.addView(logo);
-        TextView name=text("SURFACE SPEAKER",26,TEXT,true);name.setLetterSpacing(.04f);page.addView(name);
-        TextView subtitle=text(t("把节奏传递给每一个平面","Turn rhythm into surface resonance"),12,MUTED,false);
-        subtitle.setPadding(0,d(2),0,d(8));page.addView(subtitle);
-
-        spectrum=new SpectrumView(this);page.addView(spectrum,lp(-1,285));
-        statusLabel=text(t("就绪 · 马达能力检测完成","Ready · Haptic capabilities checked"),12,ACCENT,false);
-        statusLabel.setGravity(Gravity.CENTER);page.addView(statusLabel);
-
-        LinearLayout playback=card(page);
-        header(playback,t("本地播放","LOCAL PLAYER"),t("仅访问你选择的音频文件","Only the selected audio file is accessed"));
-        trackLabel=text(t("尚未选择音乐","No track selected"),13,TEXT,false);trackLabel.setMaxLines(2);trackLabel.setPadding(0,0,0,d(10));playback.addView(trackLabel);
-        LinearLayout row=row();
-        Button choose=subtle(t("选择音乐","Select music"));row.addView(choose,new LinearLayout.LayoutParams(0,d(48),1));
-        choose.setOnClickListener(v->openFile());
-        playButton=button(t("开始播放","Play"));LinearLayout.LayoutParams c=new LinearLayout.LayoutParams(0,d(48),1);c.leftMargin=d(10);row.addView(playButton,c);
-        disabled(playButton,false);playButton.setOnClickListener(v->playPause());
-        playback.addView(row);
-        Button stop=subtle(t("停止播放 / 立即停止马达","Stop playback / stop motor"));
-        LinearLayout.LayoutParams st=lp(-1,45);st.topMargin=d(9);playback.addView(stop,st);stop.setOnClickListener(v->stop());
-
-        LinearLayout profiles=card(page);
-        header(profiles,t("触觉模板","HAPTIC PRESETS"),t("修改任何参数将自动切换到自定义模板","Changing a control switches to Custom"));
-        LinearLayout a=row(),b=row();profiles.addView(a);LinearLayout.LayoutParams gap=lp(-1,-2);gap.topMargin=d(9);profiles.addView(b,gap);
-        String[] pNames={t("平衡","Balanced"),t("低频增强","Deep Bass"),t("精细触感","Detail"),t("自定义","Custom")};
+        LinearLayout shell=column();shell.setBackgroundColor(BACK);
+        LinearLayout top=row();top.setPadding(d(20),d(15),d(20),d(8));
+        TextView brand=text("S / S",18,ACCENT,true);brand.setLetterSpacing(.18f);top.addView(brand);
+        TextView heading=text("  SURFACE SPEAKER",17,TEXT,true);top.addView(heading);
+        TextView version=text("  v0.4",11,MUTED,false);top.addView(version);
+        shell.addView(top,lp(-1,54));
+        FrameLayout frame=new FrameLayout(this);shell.addView(frame,new LinearLayout.LayoutParams(-1,0,1));
         for(int i=0;i<4;i++){
-            final int idx=i;Button x=subtle(pNames[i]);presetButtons[i]=x;
-            LinearLayout dest=i<2?a:b;
-            LinearLayout.LayoutParams param=new LinearLayout.LayoutParams(0,d(44),1);
-            if((i%2)==1)param.leftMargin=d(8);
-            dest.addView(x,param);x.setOnClickListener(v->selectPreset(idx));
+            ScrollView scroller=new ScrollView(this);scroller.setFillViewport(true);
+            scroller.setOverScrollMode(View.OVER_SCROLL_NEVER);
+            LinearLayout page=column();page.setPadding(d(20),d(5),d(20),d(26));
+            scroller.addView(page);frame.addView(scroller,new FrameLayout.LayoutParams(-1,-1));
+            sections[i]=scroller;
+            if(i==0){
+                TextView intro=text(t("把声音变成触觉","Feel the sound"),21,TEXT,true);page.addView(intro);
+                spectrum=new SpectrumView(this);page.addView(spectrum,lp(-1,270));
+                statusLabel=text(t("等待音频信号","Waiting for audio"),12,ACCENT,false);
+                statusLabel.setGravity(Gravity.CENTER);page.addView(statusLabel);
+                LinearLayout live=card(page);
+                header(live,t("实时音乐","LIVE AUDIO"),t("捕获其他应用允许共享的媒体声音 · 需要系统授权","Capture permitted audio from other apps · Android consent required"));
+                captureButton=button(t("开始实时捕获","Start live capture"));live.addView(captureButton,lp(-1,52));
+                captureButton.setOnClickListener(v->{if(PlaybackCaptureService.running)stopCapture();else startCapture();});
+                captureStatus=text(t("未激活","Inactive"),13,MUTED,false);
+                captureStatus.setPadding(0,d(10),0,d(2));live.addView(captureStatus);
+                inputStatus=text(t("输入音频：无","Audio input: none"),12,MUTED,false);live.addView(inputStatus);
+                motorStatus=text(t("振动指令：0","Motor commands: 0"),12,MUTED,false);live.addView(motorStatus);
+                LinearLayout basic=card(page);
+                header(basic,t("权限与激活","PERMISSIONS & STATUS"),t("授权≠驱动工作；每项独立检测","Authorization and actual driver output are different"));
+                authorization=text("",13,MUTED,false);authorization.setLineSpacing(d(4),1f);basic.addView(authorization);
+                Button refresh=subtle(t("刷新状态","Refresh status"));LinearLayout.LayoutParams rr=lp(-1,43);rr.topMargin=d(10);basic.addView(refresh,rr);refresh.setOnClickListener(v->updateCapabilityButtons());
+                Button verify=button(t("测试马达 · 强度 43%","Test motor · 43% intensity"));LinearLayout.LayoutParams vr=lp(-1,46);vr.topMargin=d(11);basic.addView(verify,vr);
+                disabled(verify,engine.features.present);
+                verify.setOnClickListener(v->{engine.test(tune,false);motorStatus.setText(t("测试振动已发送；","Test pulse sent; ")+engine.lastError());notifyStatus(t("如果没有触感，请检查系统振动设置及省电策略","If no movement, check system haptic settings"));});
+            }else if(i==1){
+                TextView title=text(t("本地音乐","LOCAL AUDIO"),22,TEXT,true);page.addView(title);
+                LinearLayout playback=card(page);
+                header(playback,t("播放器","PLAYER"),t("选中文件后自动准备并播放；无需 Root","Select audio to play immediately; no root needed"));
+                trackLabel=text(t("尚未选择音乐","No track selected"),14,TEXT,false);trackLabel.setPadding(0,0,0,d(12));playback.addView(trackLabel);
+                Button choose=subtle(t("选择音频文件","Choose audio file"));playback.addView(choose,lp(-1,50));choose.setOnClickListener(v->openFile());
+                playButton=button(t("开始播放","Play"));LinearLayout.LayoutParams pp=lp(-1,50);pp.topMargin=d(10);playback.addView(playButton,pp);
+                disabled(playButton,false);playButton.setOnClickListener(v->playPause());
+                Button stop=subtle(t("停止播放","Stop player"));LinearLayout.LayoutParams sp=lp(-1,45);sp.topMargin=d(8);playback.addView(stop,sp);stop.setOnClickListener(v->{stop();notifyStatus(t("已停止","Stopped"));});
+                TextView info=text(t("部分编码格式可能不受系统播放器支持。请选择 MP3/WAV 文件测试。","Unsupported codecs may fail. Try an MP3/WAV file."),12,MUTED,false);
+                LinearLayout.LayoutParams in=lp(-1,-2);in.topMargin=d(12);playback.addView(info,in);
+            }else if(i==2){
+                TextView title=text(t("振动调音","HAPTIC TUNING"),22,TEXT,true);page.addView(title);
+                LinearLayout profiles=card(page);
+                header(profiles,t("默认模板","PRESETS"),t("切换后立即应用；手动调整后保存为自定义","Presets apply immediately; changes save as Custom"));
+                LinearLayout a=row(),b=row();profiles.addView(a);LinearLayout.LayoutParams gap=lp(-1,-2);gap.topMargin=d(9);profiles.addView(b,gap);
+                String[] names={t("平衡","Balanced"),t("低频增强","Bass"),t("细节","Detail"),t("自定义","Custom")};
+                for(int k=0;k<4;k++){
+                    final int idx=k;Button x=subtle(names[k]);presetButtons[k]=x;
+                    LinearLayout dest=k<2?a:b;
+                    LinearLayout.LayoutParams param=new LinearLayout.LayoutParams(0,d(46),1);
+                    if((k%2)==1)param.leftMargin=d(8);
+                    dest.addView(x,param);x.setOnClickListener(v->selectPreset(idx));
+                }
+                presetLabel=text("",12,MUTED,false);presetLabel.setPadding(0,d(12),0,0);profiles.addView(presetLabel);
+                LinearLayout adjust=card(page);
+                header(adjust,t("细节调节","FINE TUNING"),t("松开滑块可触发一次短振动预览","Release a slider for a short haptic preview"));
+                slider(adjust,t("振动增益","Haptic gain"),0,100,tune.gain,false,v->tune.gain=v);
+                slider(adjust,t("低频权重","Bass weighting"),0,100,tune.bass,false,v->tune.bass=v);
+                slider(adjust,t("触发阈值","Noise gate"),0,70,tune.gate,false,v->tune.gate=v);
+                slider(adjust,t("平滑","Smoothing"),0,100,tune.smoothing,false,v->tune.smoothing=v);
+                slider(adjust,t("脉冲宽度 ms","Pulse duration ms"),25,65,tune.pulse,false,v->tune.pulse=v);
+                slider(adjust,t("马达频率 Hz","Motor frequency Hz"),
+                   engine.features.envelope?(int)Math.ceil(engine.features.minHz):40,
+                   engine.features.envelope?(int)Math.floor(engine.features.maxHz):500,
+                   tune.frequency,true,v->tune.frequency=v);
+                slider(adjust,t("本地音量","Local player volume"),0,100,tune.speaker,false,v->{tune.speaker=v;if(player!=null)player.setVolume(v/100f,v/100f);});
+                LinearLayout routes=card(page);
+                header(routes,t("输出路径","OUTPUT ROUTES"),t("不可用时禁用，不虚报支持","Disabled when hardware support is absent"));
+                envelopeButton=subtle("");routes.addView(envelopeButton,lp(-1,48));
+                envelopeButton.setOnClickListener(v->{useEnvelope=!useEnvelope;savePrefs();updateCapabilityButtons();});
+                nativeButton=subtle("");LinearLayout.LayoutParams nr=lp(-1,48);nr.topMargin=d(8);routes.addView(nativeButton,nr);
+                nativeButton.setOnClickListener(v->{useNative=!useNative;savePrefs();updateCapabilityButtons();});
+            }else{
+                TextView title=text(t("设备诊断","DIAGNOSTICS"),22,TEXT,true);page.addView(title);
+                LinearLayout probe=card(page);
+                header(probe,t("厂商驱动与授权","DRIVER & ACCESS"),t("Root/Shizuku 只读探测，不改写设备节点","Read-only Root/Shizuku probes; no device writes"));
+                Button capabilities=subtle(t("硬件能力","Hardware features"));probe.addView(capabilities,lp(-1,48));capabilities.setOnClickListener(v->showCapabilities());
+                LinearLayout access=row();LinearLayout.LayoutParams ar=lp(-1,48);ar.topMargin=d(10);probe.addView(access,ar);
+                shizukuButton=subtle("Shizuku");access.addView(shizukuButton,new LinearLayout.LayoutParams(0,d(48),1));
+                shizukuButton.setOnClickListener(v->runShizukuScan());
+                Button rootButton=subtle("Root / KernelSU");LinearLayout.LayoutParams rp=new LinearLayout.LayoutParams(0,d(48),1);rp.leftMargin=d(8);access.addView(rootButton,rp);
+                rootButton.setOnClickListener(v->runRootScan());
+                Button test=subtle(t("再次测试原生振动","Test native vibration"));LinearLayout.LayoutParams tl=lp(-1,48);tl.topMargin=d(10);probe.addView(test,tl);
+                disabled(test,engine.features.present);test.setOnClickListener(v->{engine.test(tune,false);notifyStatus(t("已请求原生振动；","Native vibration requested; ")+engine.lastError());});
+                Button vendor=subtle(t("小米 HE 短振动试验","Xiaomi HE short test"));LinearLayout.LayoutParams vt=lp(-1,48);vt.topMargin=d(8);probe.addView(vendor,vt);
+                disabled(vendor,engine.features.vendorClass);vendor.setOnClickListener(v->{new Thread(()->{String out=MiHapticProbe.shortTest();ui.post(()->notifyStatus(out));},"vendor-test").start();});
+                Button export=subtle(t("导出驱动报告","Export diagnostics"));LinearLayout.LayoutParams et=lp(-1,48);et.topMargin=d(8);probe.addView(export,et);export.setOnClickListener(v->exportReport());
+                message=text(t("本应用不会更改 AVB、SELinux 或系统分区。","No changes to AVB, SELinux or system partitions."),12,MUTED,false);
+                message.setTextIsSelectable(true);message.setPadding(0,d(14),0,0);probe.addView(message);
+            }
         }
-        presetLabel=text("",12,MUTED,false);presetLabel.setPadding(0,d(10),0,0);profiles.addView(presetLabel);
-
-        LinearLayout adjust=card(page);
-        header(adjust,t("精细调音","FINE TUNING"),t("软件音频映射，并非直接修改驱动寄存器","Audio-to-haptic mapping; not driver register editing"));
-        slider(adjust,t("振动增益","Haptic gain"),0,65,tune.gain,false, v->tune.gain=v);
-        slider(adjust,t("低频权重","Bass weighting"),0,100,tune.bass,false,v->tune.bass=v);
-        slider(adjust,t("触发阈值","Noise gate"),0,70,tune.gate,false,v->tune.gate=v);
-        slider(adjust,t("平滑程度","Smoothing"),0,100,tune.smoothing,false,v->tune.smoothing=v);
-        slider(adjust,t("振动脉冲时长","Pulse duration (ms)"),20,65,tune.pulse,false,v->tune.pulse=v);
-        slider(adjust,t("马达输出频率","Motor frequency (Hz)"),
-            engine.features.envelope?(int)Math.ceil(engine.features.minHz):40,
-            engine.features.envelope?(int)Math.floor(engine.features.maxHz):500,
-            tune.frequency,true,v->tune.frequency=v);
-        slider(adjust,t("扬声器音量","Speaker volume"),0,100,tune.speaker,false,v->{tune.speaker=v;if(player!=null)player.setVolume(v/100f,v/100f);});
-
-        LinearLayout routes=card(page);
-        header(routes,t("输出引擎","OUTPUT ROUTING"),t("硬件不支持的引擎自动停用并显示灰色","Unavailable hardware routes are disabled"));
-        envelopeButton=subtle("");routes.addView(envelopeButton,lp(-1,48));
-        envelopeButton.setOnClickListener(v->{useEnvelope=!useEnvelope;savePrefs();updateCapabilityButtons();});
-        nativeButton=subtle("");LinearLayout.LayoutParams nr=lp(-1,48);nr.topMargin=d(8);routes.addView(nativeButton,nr);
-        nativeButton.setOnClickListener(v->{useNative=!useNative;savePrefs();updateCapabilityButtons();});
-
-        LinearLayout probe=card(page);
-        header(probe,t("驱动与权限","DRIVER & ACCESS"),t("仅只读诊断；不修改系统、内核或马达参数","Read-only diagnostics; no system or driver writes"));
-        Button capabilities=subtle(t("刷新能力列表","Refresh capabilities"));probe.addView(capabilities,lp(-1,48));
-        capabilities.setOnClickListener(v->showCapabilities());
-        LinearLayout access=row();LinearLayout.LayoutParams ar=lp(-1,48);ar.topMargin=d(10);probe.addView(access,ar);
-        shizukuButton=subtle("Shizuku");access.addView(shizukuButton,new LinearLayout.LayoutParams(0,d(48),1));
-        shizukuButton.setOnClickListener(v->runShizukuScan());
-        Button rootButton=subtle("Root / su");LinearLayout.LayoutParams rp=new LinearLayout.LayoutParams(0,d(48),1);rp.leftMargin=d(8);access.addView(rootButton,rp);
-        rootButton.setOnClickListener(v->runRootScan());
-        Button shortTest=subtle(t("低强度短振动测试","Low-strength motor test"));LinearLayout.LayoutParams tl=lp(-1,48);tl.topMargin=d(10);probe.addView(shortTest,tl);
-        disabled(shortTest,engine.features.present);shortTest.setOnClickListener(v->engine.test(tune,useEnvelope));
-        Button vendorTest=subtle(t("厂商 HE 短脉冲测试 (120ms)","Vendor HE test (120ms)"));LinearLayout.LayoutParams vt=lp(-1,48);vt.topMargin=d(8);probe.addView(vendorTest,vt);
-        disabled(vendorTest,engine.features.vendorClass);vendorTest.setOnClickListener(v->{
-            new Thread(()->{String s=MiHapticProbe.shortTest();ui.post(()->notifyStatus(s));},"vendor-test").start();
-        });
-        Button export=subtle(t("导出硬件报告","Export hardware report"));LinearLayout.LayoutParams et=lp(-1,48);et.topMargin=d(8);probe.addView(export,et);
-        export.setOnClickListener(v->exportReport());
-        message=text(t("本应用不会改变 AVB、SELinux 或系统分区。","No AVB, SELinux or system partition changes."),12,MUTED,false);
-        message.setTextIsSelectable(true);message.setPadding(0,d(14),0,0);probe.addView(message);
-        TextView foot=text(t("实验性质 · 强度从低开始 · 长时间连续振动请及时停止","Experimental · Start low · Stop sustained vibration if warm"),11,DISABLED,false);
-        LinearLayout.LayoutParams fl=lp(-1,-2);fl.topMargin=d(20);page.addView(foot,fl);
-        setContentView(scroller);
-        refreshSliders();refreshPresets();
+        LinearLayout nav=row();nav.setPadding(d(8),d(10),d(8),d(14));nav.setBackgroundColor(0xff20271b);
+        String[] titles={t("首页","Home"),t("音乐","Music"),t("调节","Tune"),t("设备","Device")};
+        for(int i=0;i<4;i++){
+            final int tab=i;Button b=subtle(titles[i]);dock[i]=b;
+            LinearLayout.LayoutParams par=new LinearLayout.LayoutParams(0,d(52),1);
+            if(i>0)par.leftMargin=d(5);nav.addView(b,par);b.setOnClickListener(v->showTab(tab));
+        }
+        shell.addView(nav,lp(-1,76));setContentView(shell);
+        showTab(0);refreshSliders();refreshPresets();updateCapabilityButtons();
+    }
+    private void showTab(int which){
+        for(int i=0;i<4;i++){
+            sections[i].setVisibility(i==which?View.VISIBLE:View.GONE);
+            dock[i].setBackground(background(i==which?ACCENT:0xff343d2e,14));
+            dock[i].setTextColor(i==which?BACK:TEXT);
+        }
+    }
+    private void startCapture(){
+        if(!engine.features.present){notifyStatus(t("马达不可用","Vibrator unavailable"));return;}
+        if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){
+            pendingCapture=true;requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},REQUEST_RECORD);return;
+        }
+        try{
+            MediaProjectionManager mgr=(MediaProjectionManager)getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+            startActivityForResult(mgr.createScreenCaptureIntent(),REQUEST_CAPTURE);
+            notifyStatus(t("请允许系统音频捕获","Allow audio capture in Android dialog"));
+        }catch(Exception e){notifyStatus(t("音频捕获授权失败：","Capture consent failed: ")+e.getMessage());}
+    }
+    private void stopCapture(){stopService(new Intent(this,PlaybackCaptureService.class));
+        PlaybackCaptureService.running=false;updateCapabilityButtons();spectrum.setPlaying(false);
+        notifyStatus(t("实时捕获停止","Live capture stopped"));}
+    private void updateDashboard(){
+        if(captureButton!=null)captureButton.setText(PlaybackCaptureService.running?t("停止实时捕获","Stop live capture"):t("开始实时捕获","Start live capture"));
+        if(captureStatus!=null)captureStatus.setText(PlaybackCaptureService.running?t("实时捕获正在运行","Live capture active"):t("实时捕获未激活","Live capture inactive"));
+        if(authorization!=null){
+            boolean sh=false;try{sh=Shizuku.pingBinder()&&Shizuku.checkSelfPermission()==PackageManager.PERMISSION_GRANTED;}catch(Throwable ignored){}
+            authorization.setText(t("马达：","Vibrator: ")+(engine.features.present?t("可用","available"):t("不可用","unavailable"))+
+                "   ·   "+t("振幅：","Amplitude: ")+(engine.features.amplitude?"✓":"—")+
+                "\n"+t("音频捕获权限：","Audio permission: ")+(checkSelfPermission(Manifest.permission.RECORD_AUDIO)==PackageManager.PERMISSION_GRANTED?"✓":t("未授权","not granted"))+
+                "\nRoot: "+(rootAuthorized?t("已验证 UID 0","verified UID 0"):t("未验证（点设备页检测）","not verified; probe in Device"))+
+                "\nShizuku: "+(sh?t("已授权","granted"):t("未连接或未授权","offline / unauthorized"))+
+                "\nPWLE: "+(engine.features.envelope?t("支持","available"):t("不可用","unavailable"))+
+                "   ·   HapticGenerator: "+(engine.features.nativeAudio?"✓":"—"));
+        }
     }
     private interface ValueChange {void changed(int value);}
     private void slider(LinearLayout parent,String title,int low,int high,int init,boolean frequency,ValueChange change){
@@ -219,10 +286,10 @@ public final class MainActivity extends Activity {
         bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){
             @Override public void onProgressChanged(SeekBar s,int progress,boolean fromUser){
                 int val=progress+low;amount.setText(String.valueOf(val));
-                if(fromUser){change.changed(val);preset=3;savePrefs();refreshPresets();}
+                if(fromUser){change.changed(val);preset=3;savePrefs();refreshPresets();PlaybackCaptureService.updateTune(tune);}
             }
             @Override public void onStartTrackingTouch(SeekBar s){}
-            @Override public void onStopTrackingTouch(SeekBar s){}
+            @Override public void onStopTrackingTouch(SeekBar s){if(s.isEnabled() && !PlaybackCaptureService.running)engine.test(tune,false);}
         });
     }
     private void refreshSliders(){
@@ -246,6 +313,7 @@ public final class MainActivity extends Activity {
         if(index<3)tune=HapticEngine.preset(index);
         refreshSliders();refreshPresets();savePrefs();
         if(player!=null)player.setVolume(tune.speaker/100f,tune.speaker/100f);
+        PlaybackCaptureService.updateTune(tune);
     }
     private void notifyStatus(String txt){if(message!=null)message.setText(txt);if(statusLabel!=null)statusLabel.setText(txt.length()>100?txt.substring(0,100):txt);}
     private void updateCapabilityButtons(){
@@ -268,6 +336,7 @@ public final class MainActivity extends Activity {
             // Allow tapping an offline entry to show a meaningful explanation.
             shizukuButton.setAlpha(binder?1:.55f);
         }
+        updateDashboard();
     }
     private String capabilityReport(){
         HapticEngine.Features f=engine.features;
@@ -295,7 +364,9 @@ public final class MainActivity extends Activity {
         notifyStatus(t("正在请求 Root，只读检测驱动…","Requesting root; read-only driver probe…"));
         new Thread(()->{
             String result=ProbeCommands.execute(true);
-            ui.post(()->{report="Root\n"+result;notifyStatus(t("Root 检测结束，可以导出报告","Root probe complete; report available"));});
+            ui.post(()->{report="Root\n"+result;rootAuthorized=result.contains("uid=0(");
+                notifyStatus(rootAuthorized?t("Root 已通过 UID 0 验证","Root verified as UID 0"):t("Root 执行失败，查看设备报告：","Root probe failed; see report: ")+result);
+                updateCapabilityButtons();});
         },"su-inspector").start();
     }
     private void runShizukuScan(){
@@ -337,14 +408,32 @@ public final class MainActivity extends Activity {
     }
     @Override protected void onActivityResult(int req,int result,Intent data){
         super.onActivityResult(req,result,data);
-        if(result!=RESULT_OK || data==null || data.getData()==null)return;
+        if(req==REQUEST_CAPTURE){
+            if(result!=RESULT_OK || data==null){notifyStatus(t("用户取消实时音频授权","Live audio consent cancelled"));return;}
+            stop(); // local player only; background capture remains independent
+            try{
+                Intent service=new Intent(this,PlaybackCaptureService.class).setAction(PlaybackCaptureService.START)
+                    .putExtra(PlaybackCaptureService.CODE,result).putExtra(PlaybackCaptureService.DATA,data);
+                startForegroundService(service);
+                captureStatus.setText(t("正在启动实时捕获…","Starting live capture…"));
+            }catch(Exception e){notifyStatus(t("服务启动失败：","Capture service failed: ")+e.getMessage());}
+            return;
+        }
+        if(result!=RESULT_OK || data==null || data.getData()==null){
+            if(req==REQUEST_FILE)notifyStatus(t("没有选择文件","No file selected"));return;
+        }
         if(req==REQUEST_FILE){
             stop();file=data.getData();
             try{getContentResolver().takePersistableUriPermission(file,Intent.FLAG_GRANT_READ_URI_PERMISSION);}catch(Exception ignored){}
             selectedName=file.getLastPathSegment();
-            trackLabel.setText(selectedName==null?t("已选择文件","File selected"):selectedName);
-            disabled(playButton,false);
-            notifyStatus(t("已加载文件 · 开始播放前会请求音频可视化权限","Track selected · Visualization permission is requested on playback"));
+            try(Cursor cursor=getContentResolver().query(file,new String[]{OpenableColumns.DISPLAY_NAME},null,null,null)){
+                if(cursor!=null&&cursor.moveToFirst())selectedName=cursor.getString(0);
+            }catch(Exception ignored){}
+            trackLabel.setText(selectedName==null?t("已选中文件","File selected"):selectedName);
+            disabled(playButton,true);
+            showTab(1);
+            notifyStatus(t("文件已选择，正在准备播放…","Track selected; preparing playback…"));
+            playPause();
         }else if(req==REQUEST_EXPORT){
             try(java.io.OutputStream stream=getContentResolver().openOutputStream(data.getData())){
                 if(stream!=null)stream.write(capabilityReport().getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -372,11 +461,10 @@ public final class MainActivity extends Activity {
     @Override public void onRequestPermissionsResult(int code,String[] permissions,int[] results){
         super.onRequestPermissionsResult(code,permissions,results);
         if(code==REQUEST_RECORD){
-            if(results.length>0&&results[0]==PackageManager.PERMISSION_GRANTED)startPlayback();
-            else {
-                startPlayback();
-                notifyStatus(t("可播放音乐，但音频可视化及软件振动同步已停用","Music available; spectrum and reactive haptics disabled"));
-            }
+            boolean granted=results.length>0&&results[0]==PackageManager.PERMISSION_GRANTED;
+            if(pendingCapture){pendingCapture=false;if(granted)startCapture();else notifyStatus(t("实时音频捕获需要录音权限","Capture needs audio permission"));}
+            else {startPlayback();if(!granted)notifyStatus(t("播放可用，但没有录音权限时不会驱动马达","Player works but haptics need audio permission"));}
+            updateDashboard();
         }
     }
     private void startPlayback(){
@@ -442,7 +530,7 @@ public final class MainActivity extends Activity {
                     float rms=Math.min(1,allSum/72f);
                     float bass=Math.min(1,lowSum/30f);
                     ui.post(()->{
-                        if(player!=null&&player.isPlaying()){
+                        if(player!=null&&player.isPlaying()&&!PlaybackCaptureService.running){
                             spectrum.pushSpectrum(bars,rms);
                             if(!nativeActive())engine.onAudio(rms,bass,tune,useEnvelope);
                         }
@@ -463,6 +551,23 @@ public final class MainActivity extends Activity {
         prepared=false;loading=false;spectrum.setPlaying(false);
         if(playButton!=null)playButton.setText(t("开始播放","Play"));
     }
-    @Override protected void onStop(){stop();super.onStop();}
-    @Override protected void onDestroy(){stop();Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener);super.onDestroy();}
+    @Override protected void onResume(){super.onResume();
+        PlaybackCaptureService.listener=new PlaybackCaptureService.Listener(){
+            @Override public void onCaptureFrame(AudioAnalysis.Frame frame,int pulses){
+                if(spectrum!=null){spectrum.setPlaying(true);spectrum.pushSpectrum(frame.bars,frame.rms);}
+                if(inputStatus!=null)inputStatus.setText(t("音频信号：","Audio signal: ")+Math.round(frame.rms*100)+"%");
+                if(motorStatus!=null)motorStatus.setText(t("已发送振动指令：","Motor commands issued: ")+pulses);
+            }
+            @Override public void onCaptureState(String status,boolean active){
+                notifyStatus(status);updateDashboard();
+                if(!active&&spectrum!=null&&player==null)spectrum.setPlaying(false);
+            }
+        };
+        if(engine!=null)updateCapabilityButtons();
+    }
+    @Override protected void onStop(){if(!PlaybackCaptureService.running)stop();super.onStop();}
+    @Override protected void onDestroy(){
+        if(PlaybackCaptureService.listener!=null)PlaybackCaptureService.listener=null;
+        stop();Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener);super.onDestroy();
+    }
 }

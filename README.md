@@ -1,35 +1,27 @@
-# SurfaceSpeaker 0.3 — Xiaomi 14 Pro haptic audio research app
+# SurfaceSpeaker 0.4 — Android haptic audio prototype
 
-This is a separate continuation of **SurfaceSpeaker Root Lab v0.2**. Existing source and APKs remain untouched.
+An experimental native Android application for Xiaomi 14 Pro (`shennong`, Android 16) and other Android 12+ phones.
 
-## Scope
+## v0.4 changes
 
-* Chinese or English UI based on system locale (no manual selection).
-* Dark olive / lime UI with true FFT-driven, CAVA-inspired circular spectrum (72 logarithmic bands). Select music with Android's system document picker.
-* Three built-in presets: Balanced, Deep Bass, Detail; a saved Custom preset; individual sliders for gain, bass weighting, noise gate, smoothing, pulse duration, speaker volume, and **frequency where PWLE is truly supported**.
-* Capability-aware greyed-out frequency, waveform-envelope and native HapticGenerator controls. The UI does not assume that the Xiaomi 14 Pro has exposed API 36 frequency control even though the motor's marketing bandwidth is 50–500 Hz.
-* Root `su` and Shizuku **UserService** permission paths for safe, read-only driver discovery. Can export reports. Shizuku uses its official Java SDK; no reliance on unsupported `rish` scripts.
-* Android amplitude-waveform pulses and optional Android 16 PWLE, strictly capped. The MiHaptic/HE test sends only 120ms low-intensity vendor test from the previous experimental project.
-* No network permission, background motor operation, unknown driver writes, kernel patches, remounts or SELinux changes.
+- Four separate pages with a **fixed bottom dock**: Home, Music, Tune, Device. Chinese / English follows the system locale.
+- Home shows a live circular spectrum, audio input strength, **number of vibration commands issued**, permissions and activation status. Commands sent are not a confirmation of mechanical movement.
+- A real-time **system playback capture** route using Android MediaProjection + a foreground service with an audio-only `AudioPlaybackCaptureConfiguration`. Audio is processed on-device in memory (PCM to 72 log-frequency bars); it is not stored or transmitted. Android shows a consent dialog; the recording/foreground notification is visible. Captures only media/game apps which permit capture. Some DRM/protected apps will be silent.
+- Local file picker now immediately attempts playback after selecting the track, displays the document's display name, and gives meaningful error feedback.
+- Default presets and fine tuning, with a short motor preview when releasing sliders. PWM/PWLE frequency and HapticGenerator remain greyed out if unavailable.
+- Audio-energy mapping improved for stronger yet capped 25–65ms pulses; 95ms minimum separation, periodic half-second pauses every 8 seconds. Not a high-fidelity haptic PCM output.
+- Root probe now invokes `su` via `/system/bin/sh -c` for compatibility; it reports success only after UID 0 has been confirmed. Shizuku remains read-only.
 
-## Known limitations — IMPORTANT
+## Limitations / known issues
 
-This version provides **music-reactive vibration / acoustic-resonance experimentation**, NOT verified PCM-to-motor fidelity or the high-quality surface loudspeaker output in the referenced video. Audio spectrum is obtained through `Visualizer` for app's MediaPlayer session. `RECORD_AUDIO` permission is used for the analyzer; it does not record microphone audio or upload content. Playback and reactive vibration are foreground-only.
+- No direct writing to `/dev/qcom_haptic` or sysfs; vendor protocol is not yet safely verified. Root and Shizuku do **not** grant native PCM-to-motor functionality in this version.
+- The system AudioPlaybackCapture API excludes protected, non-opted-in, and certain app audio by design.
+- No physical Xiaomi 14 Pro hardware validation was possible in CI. Granting root to an older package ID does not authorize `dev.surfacespeaker.lab03`; grant it for this exact application in the KernelSU manager.
 
-Both privileged modes currently enable **read-only motor interface identification**, not direct RTP/FIFO PCM streaming. Whether a future version can output audible music through the ESA1016 actuator depends on verification of a stable vendor driver interface on the user's actual Xiaomi 14 Pro build. **Shizuku's shell UID is not equal to root**, and neither mode guarantees write permission to device nodes.
+## Install
 
-## Build
+Use the `Build SurfaceSpeaker APK` GitHub Actions workflow, download its `SurfaceSpeaker-v0.4-debug-apk` artifact ZIP, unzip, then install `app-debug.apk`. Debug application ID: `dev.surfacespeaker.lab03` (upgrades v0.3).
 
-Requires Android SDK Platform 36, JDK 17+, Android Gradle Plugin 8.11.2, Gradle 8.13 and Maven Central (Shizuku SDK 13.1.5). In Android Studio: open root folder, sync, run **Build > Build APK(s)**, or use Gradle `:app:assembleDebug`.
+## Safety
 
-APK output: `app/build/outputs/apk/debug/app-debug.apk`. No APK has been built or validated in the current offline build environment.
-
-## Safe testing
-
-Start with 0 speaker volume if you want to compare whether the sound really comes from the table. The motor is optimized for haptics rather than broadband acoustics. Begin with low gain; the vibration pulse engine limits intensity and periodically pauses to reduce sustained operation, but it does not have calibrated thermal feedback.
-
-Inspect with Root or Shizuku, export the report and verify vendor RTP/FIFO support before considering more advanced hardware-specific operations.
-
-## GitHub Actions alternate build
-
-If Android Studio is unavailable, place this independent project in a **new dedicated repository** (not on top of unrelated work). The included `.github/workflows/build-apk.yml` builds on push to `main` or by manually selecting **Run workflow**. Download `SurfaceSpeaker-v0.3-debug-apk` from the run's Artifacts section. This avoids touching any of your existing repositories.
+No AVB, SELinux, kernel partition, or system partition changes. Never sends raw arbitrary IOCTLs to unverified drivers. Long continuous motor drive can cause heat; this prototype caps intensity and pulse lengths.
