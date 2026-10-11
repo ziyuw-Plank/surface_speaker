@@ -4,7 +4,7 @@ package dev.surfacespeaker.app;
  *  Drop-in replacement for {@link MotorPcmDsp} (same API, same PEAK safety cap).
  *  Chain: 2nd-order Butterworth HP -> psychoacoustic virtual bass (missing
  *  fundamental harmonics, re-injected above the HP corner) -> LRA resonance
- *  notch (tames boom/rattle at f0) -> "bone" presence peak ~1 kHz -> 2nd-order LP
+ *  notch at f0=130 Hz (tames boom/rattle) -> "bone" presence peak ~1 kHz -> 2nd-order LP
  *  -> slow AGC + soft-knee tanh limiter -> hysteresis gate -> TPDF dither.
  */
 final class MotorPcmDspV14 {
@@ -26,7 +26,7 @@ final class MotorPcmDspV14 {
 
     private final Biquad hp=new Biquad(), hpB=new Biquad(), bassLp=new Biquad(), harmBp=new Biquad(),
         notch=new Biquad(), presence=new Biquad(), lp1=new Biquad(), lp2=new Biquad();
-    private float hpHz=95, lpHz=900, resonanceHz=170, virtualBass=0.9f;
+    private float hpHz=95, lpHz=900, resonanceHz=130, virtualBass=0.9f;
     private float env, pkEnv, compGain=1f, lastOut, rmsSq=0.0004f, normalizer=1f, gateGain;
     private int lastDetail=-1, seed=0x1234ab8f;
 
@@ -38,7 +38,7 @@ final class MotorPcmDspV14 {
         lpHz=1400f-clamp(trebleStable)*8f;
         rebuild();
     }
-    /** LRA resonant frequency (measure on device; Xiaomi X-axis LRAs are typically 150-240 Hz). */
+    /** LRA resonant frequency (shennong: ro.odm.mm.vibrator resonant_frequency=130 Hz). */
     void setResonance(float hz){resonanceHz=Math.max(100,Math.min(320,hz));rebuild();}
     /** 0..1.5 amount of psychoacoustic bass harmonics. */
     void setVirtualBass(float amount){virtualBass=Math.max(0,Math.min(1.5f,amount));}

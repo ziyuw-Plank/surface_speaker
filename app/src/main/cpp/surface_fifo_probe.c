@@ -113,7 +113,10 @@ static int play_fifo(int fd, const char *path, uint8_t *data, int samples, int s
         path,samples,samples/24000.0,strength);
     return aborted?130:0;
 }
+#define RT2_EMBED 1
+#include "richtap_stream_v2.c"
 int main(int argc,char **argv){
+    if(argc>=2&&!strncmp(argv[1],"rt2-",4)){argv[1]+=4;return richtap2_main(argc,argv);}
     if(argc<2){fprintf(stderr,"Usage: fifo probe | test <hz> <strength> | long-tone <hz> <strength> | play-file <raw> <strength> | live-stdin\n");return 2;}
     signal(SIGINT,on_signal);signal(SIGTERM,on_signal);
     char path[64];int fd=open_verified(path,sizeof(path));if(fd<0)return 3;

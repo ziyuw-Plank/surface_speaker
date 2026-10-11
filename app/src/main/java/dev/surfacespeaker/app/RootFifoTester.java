@@ -150,8 +150,10 @@ final class RootFifoTester {
             marker.delete();temp.delete();busy.set(false);
         }
     }
-    static LiveSession openLive(Context context,int frameSamples)throws Exception {
-        if(frameSamples!=1152 && frameSamples!=1440 && frameSamples!=2304)throw new IllegalArgumentException("Unsupported frame samples");
+    static final int RICHTAP_FRAME=240; // 10 ms slots for the gapless /dev/qcom_haptic ring (v0.15 experimental)
+    static LiveSession openLive(Context context,int frameSamples)throws Exception {return openLive(context,frameSamples,false);}
+    static LiveSession openLive(Context context,int frameSamples,boolean richtap)throws Exception {
+        if(richtap?frameSamples!=RICHTAP_FRAME:(frameSamples!=1152 && frameSamples!=1440 && frameSamples!=2304))throw new IllegalArgumentException("Unsupported frame samples");
         if(!deviceCandidate())throw new IllegalStateException("Native FIFO only enabled on shennong arm64");
         if(!busy.compareAndSet(false,true))throw new IllegalStateException("Another native FIFO test is active");
         File source=new File(context.getCacheDir(),"surface_fifo_stream_"+System.nanoTime());
@@ -163,7 +165,7 @@ final class RootFifoTester {
             String workdir="/data/local/tmp/ssfifo-stream-"+Long.toHexString(System.nanoTime());
             String executable=workdir+"/fifo";
             String inner="mkdir -m 0700 "+quote(workdir)+" || exit 6; cp "+quote(source.getAbsolutePath())+" "+quote(executable)
-                +" && chmod 0700 "+quote(executable)+" && "+quote(executable)+" live-stdin "+quote(marker.getAbsolutePath())+" "+frameSamples
+                +" && chmod 0700 "+quote(executable)+" && "+quote(executable)+(richtap?" rt2-live "+quote(marker.getAbsolutePath())+" 3 64 1500":" live-stdin "+quote(marker.getAbsolutePath())+" "+frameSamples)
                 +"; ret=$?; rm -f "+quote(executable)+"; rmdir "+quote(workdir)+"; exit $ret";
             Process proc=new ProcessBuilder("/system/bin/sh","-c","su -c "+quote(inner)).redirectErrorStream(true).start();
             LiveSession session=new LiveSession(proc,source,marker,frameSamples);

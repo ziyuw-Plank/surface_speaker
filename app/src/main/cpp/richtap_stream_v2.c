@@ -30,9 +30,13 @@
  *
  * Input on stdin: raw signed 8-bit PCM @ 24 kHz, any chunking (already DSP'd + capped).
  * usage: richtap2 live <stop-marker> [lead_slots=3] [gain0_128=64] [idle_ms=1500]
+ *   (embedded in native_fifo_arm64 as: fifo rt2-live|rt2-tone|rt2-f0 ...)
+ *   LRA f0 on this phone: ro.odm.mm.vibrator resonant_frequency=130 Hz
  *        richtap2 tone <hz> (0.5 s, gain 24) | richtap2 f0
  */
+#ifndef RT2_EMBED
 #define _GNU_SOURCE
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -122,36 +126,44 @@ static void rt_priority(void){
     if(sched_setscheduler(0,SCHED_FIFO,&p)!=0)fprintf(stderr,"WARN: SCHED_FIFO unavailable (%s)\n",strerror(errno));
 }
 
+/* Framed stdin protocol (same as live-stdin): [u8 strength 0..56][RT2_FRAME s8 samples].
+ * Prints "NEXT:<n>:<us>" per frame so the Java LiveSession ACK logic is reused. */
+#define RT2_FRAME SLOT_SAMPLES
+static int read_full(unsigned char *p,size_t n){
+    while(n){ssize_t r=read(0,p,n);if(r<=0){if(r<0&&errno==EINTR)continue;return -1;}p+=r;n-=(size_t)r;}
+    return 0;
+}
 static int live(unsigned lead,unsigned gain,unsigned idle_ms){
-    int8_t buf[SLOT_SAMPLES],zero[SLOT_SAMPLES]={0};unsigned have=0;
-    uint64_t last_audio=0,next_due=0;int8_t tmp[4096];
+    unsigned char in[1+RT2_FRAME];int8_t buf[RT2_FRAME],zero[RT2_FRAME]={0};
+    uint64_t last_audio=0,next_due=0;unsigned long long frames=0,shown=0;
     if(gain>128){gain=128;}
-    ioctl(fd,IOC_GAIN,(unsigned long)gain);
     rt_priority();setvbuf(stdout,NULL,_IOLBF,0);
+    if(ioctl(fd,IOC_GAIN,(unsigned long)gain)<0)fprintf(stderr,"WARN: SETTING_GAIN %s\n",strerror(errno));
     puts("READY: richtap2 gapless ring, 10ms slots");
     struct pollfd pfd={.fd=0,.events=POLLIN};
     while(!stopping()){
-        int pr=poll(&pfd,1,2);   /* 2 ms tick */
+        int pr=poll(&pfd,1,2);
         if(pr>0){
-            ssize_t r=read(0,tmp,sizeof tmp);if(r<=0)break;
-            for(ssize_t i=0;i<r;i++){
-                buf[have++]=tmp[i];
-                if(have==SLOT_SAMPLES){
-                    int loud=0;for(unsigned k=0;k<SLOT_SAMPLES;k++)if(buf[k]>2||buf[k]<-2){loud=1;break;}
-                    uint64_t t=now_us();if(loud)last_audio=t;
-                    if(!streaming&&loud){if(start_stream())return 4;next_due=t;}
-                    if(streaming){int rc=put_slot(buf,SLOT_SAMPLES,lead);if(rc<0){fprintf(stderr,"WARN: kernel stalled, restart\n");if(start_stream())return 4;}
-                        next_due=t+10000;}
-                    have=0;
-                }
+            if(pfd.revents&(POLLHUP|POLLERR)&&!(pfd.revents&POLLIN))break;
+            uint64_t t0=now_us();
+            if(read_full(in,sizeof in))break;
+            unsigned strength=in[0];if(strength>56){puts("ERROR: strength >56");return 8;}
+            int loud=0;
+            for(unsigned k=0;k<RT2_FRAME;k++){int v=((int)(int8_t)in[1+k]*(int)strength)/56;buf[k]=(int8_t)v;if(v>2||v<-2)loud=1;}
+            uint64_t t=now_us();if(loud)last_audio=t;
+            if(!streaming&&loud){if(start_stream()){puts("ERROR: STREAM_MODE failed");return 4;}}
+            if(streaming){
+                int rc=put_slot(buf,RT2_FRAME,lead);
+                if(rc<0){fprintf(stderr,"WARN: kernel stalled, restart\n");if(start_stream()){puts("ERROR: restart failed");return 4;}}
+                next_due=t+10000;
             }
+            frames++;printf("NEXT:%llu:%llu\n",frames,(unsigned long long)(now_us()-t0));
         }
         if(!streaming)continue;
         uint64_t t=now_us();
-        /* keep-alive: input late by >1 slot -> insert silence so ring never drains */
-        if(t>next_due+10000 && pending()<2){put_slot(zero,SLOT_SAMPLES,lead);keepalive++;next_due=t;}
-        if(t-last_audio>(uint64_t)idle_ms*1000){stop_stream();}
-        static unsigned long long shown;if(sent>=shown+500){shown=sent;printf("STAT sent=%llu drop=%llu keep=%llu restart=%llu pend=%u\n",sent,dropped,keepalive,restarts,pending());}
+        if(t>next_due+10000&&pending()<2){put_slot(zero,RT2_FRAME,lead);keepalive++;next_due=t;}
+        if(t-last_audio>(uint64_t)idle_ms*1000)stop_stream();
+        if(sent>=shown+1000){shown=sent;fprintf(stderr,"STATUS: rt2 sent=%llu drop=%llu keep=%llu restart=%llu pend=%u\n",sent,dropped,keepalive,restarts,pending());}
     }
     stop_stream();
     fprintf(stderr,"DONE sent=%llu drop=%llu keepalive=%llu restarts=%llu\n",sent,dropped,keepalive,restarts);
@@ -168,7 +180,11 @@ static int tone(int hz){
     uint64_t t=now_us();while(pending()&&now_us()-t<300000)sleep_us(2000);
     stop_stream();puts("OK: tone submitted (motor motion unverified)");return 0;
 }
+#ifdef RT2_EMBED
+static int richtap2_main(int argc,char **argv){
+#else
 int main(int argc,char **argv){
+#endif
     signal(SIGINT,on_sig);signal(SIGTERM,on_sig);
     if(argc<2){fprintf(stderr,"usage: live <marker> [lead] [gain] [idle_ms] | tone <hz> | f0\n");return 2;}
     if(verify()||open_ring())return 3;

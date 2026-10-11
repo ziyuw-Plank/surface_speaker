@@ -106,14 +106,22 @@ public final class PlaybackCaptureService extends Service {
         final boolean nativeMode=preferNativeFifo && RootFifoTester.deviceCandidate();
         // 48ms response (more restarts), 60ms balanced, 96ms smoother (more latency).
         final int frameMs=settings.liveFrameMs==96?96:settings.liveFrameMs==60?60:48;
-        final int frameSamples=frameMs*24;
-        final LivePcmConverter converter=nativeMode?new LivePcmConverter(frameSamples):null;
+        int frameSamples=frameMs*24;
+        LivePcmConverter converter=null;
         nativeBlocks=0;nativeDropped=0;nativeProcessingMs=0;activeFrameMs=frameMs;
         if(nativeMode){
             try{
-                liveSession=RootFifoTester.openLive(this,frameSamples);
+                // v0.15: try the gapless RichTap ring first (10 ms slots); fall back to FF_CUSTOM segments.
+                try{
+                    liveSession=RootFifoTester.openLive(this,RootFifoTester.RICHTAP_FRAME,true);
+                    frameSamples=RootFifoTester.RICHTAP_FRAME;activeFrameMs=10;
+                    routeMessage="RichTap gapless stream (10ms slots, experimental)";
+                }catch(Exception rt){
+                    liveSession=RootFifoTester.openLive(this,frameSamples,false);
+                    routeMessage="Native FIFO "+frameMs+"ms chunks (RichTap unavailable: "+rt.getMessage()+")";
+                }
+                converter=new LivePcmConverter(frameSamples);
                 motor.setEnabled(false);
-                routeMessage="Native FIFO "+frameMs+"ms chunks; FF_CUSTOM restarts between effects";
                 state(routeMessage,true);
             }catch(Exception e){
                 routeMessage="Native FIFO unavailable: "+e.getMessage();
@@ -121,6 +129,7 @@ public final class PlaybackCaptureService extends Service {
             }
         }else{routeMessage="Android Haptics compatibility";}
 
+        final LivePcmConverter finalConverter=converter;
         int silent=0;
         while(active.get()){
             int count;
@@ -130,8 +139,8 @@ public final class PlaybackCaptureService extends Service {
 
             if(nativeMode){
                 try{
-                    converter.setTune(settings.gain,settings.detail,settings.bassClean,settings.trebleStable);
-                    converter.consume(pcm,count,sampleRate,frameData->{
+                    finalConverter.setTune(settings.gain,settings.detail,settings.bassClean,settings.trebleStable);
+                    finalConverter.consume(pcm,count,sampleRate,frameData->{
                         RootFifoTester.LiveSession session=liveSession;
                         if(session==null)throw new IllegalStateException("Native root stream stopped");
                         HapticEngine.Tune nowTune=settings;
