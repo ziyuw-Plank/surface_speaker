@@ -29,7 +29,7 @@
  *     (oldest-first is impossible once VALID; we drop new input instead and count it).
  *
  * Input on stdin: raw signed 8-bit PCM @ 24 kHz, any chunking (already DSP'd + capped).
- * usage: richtap2 live <stop-marker> [lead_slots=10] [gain0_128=80] [idle_ms=1500]
+ * usage: richtap2 live <stop-marker> [lead_slots=4 (x5ms, adaptive)] [gain0_128=80] [idle_ms=1500]
  *   (embedded in native_fifo_arm64 as: fifo rt2-live|rt2-tone|rt2-f0 ...)
  *   LRA f0 on this phone: ro.odm.mm.vibrator resonant_frequency=130 Hz
  *        richtap2 tone <hz> (0.5 s, gain 24) | richtap2 f0
@@ -58,7 +58,7 @@
 #define SLOTS 16u
 #define SLOT_BYTES 1024u
 #define PAYLOAD 24u
-#define SLOT_SAMPLES 240u          /* 10 ms @ 24 kHz; multiple of 4 (HAP_PTN_FIFO_DIN_NUM) */
+#define SLOT_SAMPLES 120u          /* 5 ms @ 24 kHz; multiple of 4 (HAP_PTN_FIFO_DIN_NUM) */
 #define RATE 24000
 #define IOC_STREAM 0x520Au
 #define IOC_STOP   0x5212u
@@ -139,42 +139,73 @@ static int read_full(unsigned char *p,size_t n){
     while(n){ssize_t r=read(0,p,n);if(r<=0){if(r<0&&errno==EINTR)continue;return -1;}p+=r;n-=(size_t)r;}
     return 0;
 }
+/* Kernel facts (qcom-hv-haptics.c RichTap patch): richtap_set_fifo() sets FIFO-empty threshold 480
+ * samples (20 ms). Each FIFO-empty IRQ copies min(free HW space = 2048-480 = 1568, READY ring data);
+ * the observed "update fifo len 1572" was the free-space bound because the ring was kept full.
+ * With a shallow ring the kernel copies only what is ready, so latency ~= 20 ms HW floor + ring lead.
+ * If the IRQ finds NO ready slot (3 x 1 ms retries) the kernel ends stream mode -> we detect that
+ * (ring stops draining) and restart with a larger lead (adaptive). */
+static uint64_t wts[SLOTS];
+static unsigned char seen[SLOTS];
+static double ring_ms=0;
+static unsigned consumed_scan(uint64_t t){
+    unsigned freed=0;
+    for(unsigned i=0;i<SLOTS;i++){unsigned char v=st(i);
+        if(seen[i]==S_VALID&&v!=S_VALID){freed++;double age=(t-wts[i])/1000.0;ring_ms=ring_ms<=0?age:ring_ms*0.9+age*0.1;}
+        seen[i]=v;}
+    return freed;
+}
 static int live(unsigned lead,unsigned gain,unsigned idle_ms){
     unsigned char in[1+RT2_FRAME];int8_t buf[RT2_FRAME],zero[RT2_FRAME]={0};
-    uint64_t last_audio=0,next_due=0,full_since=0;unsigned long long frames=0,shown=0;
+    uint64_t last_audio=0,last_input=0,last_consume=0,restart_window=0;unsigned long long frames=0,shown=0;unsigned quick_restarts=0;
+    unsigned max_lead=14;
     if(gain>128){gain=128;}
-    if(lead<4)lead=4;
-    if(lead>14)lead=14;
+    if(lead<2)lead=2;
+    if(lead>max_lead)lead=max_lead;
     rt_priority();setvbuf(stdout,NULL,_IOLBF,0);
     if(ioctl(fd,IOC_GAIN,(unsigned long)gain)<0)fprintf(stderr,"WARN: SETTING_GAIN %s\n",strerror(errno));
-    puts("READY: richtap2 gapless ring, 10ms slots");
+    printf("READY: richtap2 gapless ring, 5ms slots, lead %u\n",lead);
     struct pollfd pfd={.fd=0,.events=POLLIN};
     while(!stopping()){
-        int pr=poll(&pfd,1,2);
+        int pr=poll(&pfd,1,1);
+        uint64_t t=now_us();
+        if(streaming&&consumed_scan(t))last_consume=t;
         if(pr>0){
             if(pfd.revents&(POLLHUP|POLLERR)&&!(pfd.revents&POLLIN))break;
-            uint64_t t0=now_us();
             if(read_full(in,sizeof in))break;
+            t=now_us();last_input=t;
             unsigned strength=in[0];if(strength>56){puts("ERROR: strength >56");return 8;}
             int loud=0;
             for(unsigned k=0;k<RT2_FRAME;k++){int v=((int)(int8_t)in[1+k]*(int)strength)/56;buf[k]=(int8_t)v;if(v>2||v<-2)loud=1;}
-            uint64_t t=now_us();if(loud)last_audio=t;
-            if(!streaming&&loud){if(start_stream()){puts("ERROR: STREAM_MODE failed");return 4;}}
+            if(loud)last_audio=t;
+            if(!streaming&&loud){if(start_stream()){puts("ERROR: STREAM_MODE failed");return 4;}memset(seen,S_FREE,sizeof seen);last_consume=t;}
             if(streaming){
-                int rc=put_slot(buf,RT2_FRAME,lead);
-                if(rc<0){fprintf(stderr,"WARN: kernel stalled, restart\n");if(start_stream()){puts("ERROR: restart failed");return 4;}}
-                next_due=t+10000;
+                unsigned idx=cursor;int rc=put_slot(buf,RT2_FRAME,lead);
+                if(rc==0){wts[idx]=t;seen[idx]=S_VALID;}
+                if(rc<0){fprintf(stderr,"WARN: slot busy timeout\n");}
             }
-            frames++;printf("NEXT:%llu:%llu\n",frames,(unsigned long long)((now_us()-t0)/1000));
+            frames++;printf("NEXT:%llu:%llu\n",frames,(unsigned long long)((now_us()-t)/1000));
         }
-        if(!streaming){full_since=0;continue;}
-        uint64_t t=now_us();
-        /* Kernel refills ~1572 samples (~65 ms) per FIFO-empty IRQ; if the ring stays full for 400 ms it is not consuming. */
-        if(pending()>=lead){if(!full_since)full_since=t;else if(t-full_since>400000){puts("ERROR: kernel not consuming RichTap ring (stalled >400ms)");fprintf(stderr,"ERROR: ring stalled\n");stop_stream();return 9;}}
-        else full_since=0;
-        if(t>next_due+10000&&pending()<2){put_slot(zero,RT2_FRAME,lead);keepalive++;next_due=t;}
+        if(!streaming)continue;
+        t=now_us();
+        /* Input gap (capture hiccup) -> insert silence so the kernel IRQ never finds an empty ring. */
+        if(pending()==0&&t-last_input>2*5000ull){unsigned idx=cursor;if(put_slot(zero,RT2_FRAME,lead)==0){wts[idx]=t;seen[idx]=S_VALID;keepalive++;last_input=t;}}
+        /* Ring has data but kernel stopped draining for >80 ms -> stream ended (underrun). Restart, grow lead. */
+        if(pending()>0&&t-last_consume>80000){
+            if(t-restart_window>3000000){restart_window=t;quick_restarts=0;}
+            if(++quick_restarts>6){puts("ERROR: RichTap stream keeps stopping (6 restarts/3s)");stop_stream();return 9;}
+            if(lead<max_lead)lead+=2;
+            fprintf(stderr,"STATUS: underrun -> restart, lead now %u slots (%u ms)\n",lead,lead*5);
+            printf("LEADUP:%u\n",lead);
+            streaming=0; /* kernel already stopped; skip terminal slot */
+            ioctl(fd,IOC_STOP,0);
+            if(start_stream()){puts("ERROR: restart failed");return 4;}
+            memset(seen,S_FREE,sizeof seen);last_consume=t;
+        }
         if(t-last_audio>(uint64_t)idle_ms*1000)stop_stream();
-        if(sent>=shown+1000){shown=sent;fprintf(stderr,"STATUS: rt2 sent=%llu drop=%llu keep=%llu restart=%llu pend=%u\n",sent,dropped,keepalive,restarts,pending());}
+        if(frames>=shown+200){shown=frames;
+            printf("LAT:%.0f:%u:%u\n",ring_ms,20+lead*5/2,lead); /* ring age ms, est. HW FIFO ms, lead slots */
+            fprintf(stderr,"STATUS: rt2 sent=%llu drop=%llu keep=%llu restart=%llu pend=%u ring=%.0fms\n",sent,dropped,keepalive,restarts,pending(),ring_ms);}
     }
     stop_stream();
     fprintf(stderr,"DONE sent=%llu drop=%llu keepalive=%llu restarts=%llu\n",sent,dropped,keepalive,restarts);
@@ -203,7 +234,7 @@ int main(int argc,char **argv){
     if(!strcmp(argv[1],"f0")){uint32_t f=0;rc=ioctl(fd,IOC_F0,&f);printf("F0 rc=%d value=%u (Hz, driver units unverified)\n",rc,f);rc=0;}
     else if(!strcmp(argv[1],"tone")&&argc>2)rc=tone(atoi(argv[2]));
     else if(!strcmp(argv[1],"live")&&argc>2){marker=argv[2];
-        rc=live(argc>3?(unsigned)atoi(argv[3]):10,argc>4?(unsigned)atoi(argv[4]):80,argc>5?(unsigned)atoi(argv[5]):1500);}
+        rc=live(argc>3?(unsigned)atoi(argv[3]):4,argc>4?(unsigned)atoi(argv[4]):80,argc>5?(unsigned)atoi(argv[5]):1500);}
     if(ring){munmap(ring,MMAP_SIZE);}
     if(fd>=0){close(fd);}
     return rc;

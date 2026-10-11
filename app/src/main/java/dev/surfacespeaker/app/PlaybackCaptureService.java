@@ -33,6 +33,7 @@ public final class PlaybackCaptureService extends Service {
     static volatile boolean preferNativeFifo;
     static volatile String routeMessage="Idle";
     static volatile boolean richtapActive;
+    static volatile String latencyText="-";
     static volatile int nativeBlocks;
     static volatile int nativeDropped;
     static volatile int nativeProcessingMs;
@@ -93,7 +94,7 @@ public final class PlaybackCaptureService extends Service {
                 .setAudioPlaybackCaptureConfig(capture)
                 .setAudioFormat(new AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                     .setSampleRate(sampleRate).setChannelMask(AudioFormat.CHANNEL_IN_MONO).build())
-                .setBufferSizeInBytes(Math.max(minBuffer,AudioAnalysis.N*4)).build();
+                .setBufferSizeInBytes(minBuffer).build(); // v0.15.3: minimum buffer (capacity only; reads are 5 ms)
             if(recorder.getState()!=AudioRecord.STATE_INITIALIZED)throw new IllegalStateException("AudioRecord not initialized");
             recorder.startRecording();
             if(recorder.getRecordingState()!=AudioRecord.RECORDSTATE_RECORDING)throw new IllegalStateException("Audio capture could not start");
@@ -103,7 +104,8 @@ public final class PlaybackCaptureService extends Service {
         return START_NOT_STICKY;
     }
     private void captureLoop(int sampleRate){
-        AudioAnalysis fft=new AudioAnalysis();short[] pcm=new short[512];long lastUi=0;
+        android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO);
+        AudioAnalysis fft=new AudioAnalysis();short[] pcm=new short[240];short[] hist=new short[AudioAnalysis.N];long lastUi=0;long framesRead=0;android.media.AudioTimestamp ats=new android.media.AudioTimestamp();int captureMs=-1;
         final boolean nativeMode=preferNativeFifo && RootFifoTester.deviceCandidate();
         // 48ms response (more restarts), 60ms balanced, 96ms smoother (more latency).
         final int frameMs=settings.liveFrameMs==96?96:settings.liveFrameMs==60?60:48;
@@ -114,9 +116,10 @@ public final class PlaybackCaptureService extends Service {
             try{
                 // v0.15: try the gapless RichTap ring first (10 ms slots); fall back to FF_CUSTOM segments.
                 try{
-                    liveSession=RootFifoTester.openLive(this,RootFifoTester.RICHTAP_FRAME,true,settings.fifoBoost?104:80);
+                    int lead=frameMs==48?3:frameMs==60?5:10;
+                    liveSession=RootFifoTester.openLive(this,RootFifoTester.RICHTAP_FRAME,true,settings.fifoBoost?104:80,lead);
                     frameSamples=RootFifoTester.RICHTAP_FRAME;activeFrameMs=10;richtapActive=true;
-                    routeMessage="RichTap gapless stream · 10ms slots · ring lead 100ms · gain "+(settings.fifoBoost?104:80)+"/128";
+                    routeMessage="RichTap gapless stream · 5ms slots · ring start "+(lead*5)+"ms · gain "+(settings.fifoBoost?104:80)+"/128";
                 }catch(Exception rt){
                     richtapActive=false;
                     liveSession=RootFifoTester.openLive(this,frameSamples,false);
@@ -137,7 +140,9 @@ public final class PlaybackCaptureService extends Service {
             int count;
             try {count=recorder.read(pcm,0,pcm.length,AudioRecord.READ_BLOCKING);}catch(Exception e){stopError="Audio read error: "+e.getMessage();break;}
             if(count<0){stopError="Audio read returned error "+count;break;}
-            if(count<128)continue;
+            if(count<=0)continue;
+            framesRead+=count;
+            System.arraycopy(hist,count,hist,0,hist.length-count);System.arraycopy(pcm,0,hist,hist.length-count,count);
 
             if(nativeMode){
                 try{
@@ -177,8 +182,16 @@ public final class PlaybackCaptureService extends Service {
             long now=android.os.SystemClock.uptimeMillis();
             if(now-lastUi>85){
                 lastUi=now;
+                // Capture-side delay: how old the newest frame we just read is, from AudioRecord's timestamp.
+                try{if(recorder!=null&&recorder.getTimestamp(ats,android.media.AudioTimestamp.TIMEBASE_MONOTONIC)==AudioRecord.SUCCESS){
+                    long ageNs=System.nanoTime()-ats.nanoTime+(long)((ats.framePosition-framesRead)*1e9/sampleRate);
+                    captureMs=(int)Math.max(0,ageNs/1000000);}}catch(Exception ignored){}
+                RootFifoTester.LiveSession ls=liveSession;
+                if(ls!=null&&richtapActive&&ls.ringMs>=0)
+                    latencyText="capture "+(captureMs<0?"?":captureMs)+" + ring "+ls.ringMs+" + HW≈"+ls.hwMs+" ≈ "+((captureMs<0?0:captureMs)+ls.ringMs+ls.hwMs)+" ms (+mixer, lead "+ls.lead*5+"ms"+(ls.leadUps>0?", grew x"+ls.leadUps:"")+")";
+                else if(ls!=null)latencyText="FIFO "+activeFrameMs+"ms segments; native "+nativeProcessingMs+"ms";
                 // FFT is visual feedback only; do not run it for every 10.7ms audio chunk.
-                AudioAnalysis.Frame frame=fft.analyze(pcm,count,sampleRate);
+                AudioAnalysis.Frame frame=fft.analyze(hist,hist.length,sampleRate);
                 if(frame.rms<0.006f)silent++;else silent=0;
                 int pulses=nativeMode?nativeBlocks:motor.pulseCount();
                 handler.post(()->{Listener l=listener;if(l!=null)l.onCaptureFrame(frame,pulses);});

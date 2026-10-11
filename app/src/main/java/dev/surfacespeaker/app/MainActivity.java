@@ -157,7 +157,7 @@ public final class MainActivity extends Activity {
         LinearLayout top=row();top.setPadding(d(20),d(15),d(20),d(8));
         TextView brand=text("S / S",18,ACCENT,true);brand.setLetterSpacing(.18f);top.addView(brand);
         TextView heading=text("  SURFACE SPEAKER",17,TEXT,true);top.addView(heading);
-        TextView version=text("v0.15.2",11,BACK,true);version.setPadding(d(8),d(2),d(8),d(2));version.setBackground(background(ACCENT,10));LinearLayout.LayoutParams vp=lp(-2,-2);vp.leftMargin=d(10);top.addView(version,vp);
+        TextView version=text("v0.15.3",11,BACK,true);version.setPadding(d(8),d(2),d(8),d(2));version.setBackground(background(ACCENT,10));LinearLayout.LayoutParams vp=lp(-2,-2);vp.leftMargin=d(10);top.addView(version,vp);
         shell.addView(top,lp(-1,54));
         FrameLayout frame=new FrameLayout(this);shell.addView(frame,new LinearLayout.LayoutParams(-1,0,1));
         for(int i=0;i<4;i++){
@@ -246,9 +246,9 @@ public final class MainActivity extends Activity {
                 slider(adjust,t("低频杂音抑制","Low-frequency rumble suppression"),0,100,tune.bassClean,false,v->tune.bassClean=v);
                 slider(adjust,t("高频稳定滤波","High-frequency stability"),0,100,tune.trebleStable,false,v->tune.trebleStable=v);
                 LinearLayout timing=card(page);
-                header(timing,t("实时 FIFO 响应 / 平顺度","LIVE FIFO RESPONSE / SMOOTHNESS"),
-                    t("快速 48ms：延迟较低但启停更频繁；均衡 60ms；平顺 96ms：段数较少但延迟增加。切换将在下次启动捕获生效。",
-                      "Fast 48ms: less buffering but more restarts. Balanced 60ms. Smooth 96ms: fewer restarts but higher latency. Takes effect on next capture."));
+                header(timing,t("延迟模式 · 低延迟 / 平衡 / 稳定","LATENCY MODE · LOW / BALANCED / STABLE"),
+                    t("RichTap：5ms 槽，环形缓冲起始 15/25/50ms，欠载时自动加大；另有约 20ms 硬件 FIFO 下限。FIFO 回退仍为 48/60/96ms 分段。下次捕获生效。",
+                      "RichTap: 5ms slots, ring starts at 15/25/50ms and grows on underrun; plus ~20ms HW FIFO floor. FIFO fallback keeps 48/60/96ms segments. Next capture."));
                 fifoTimingButton=subtle("");timing.addView(fifoTimingButton,lp(-1,48));
                 fifoTimingButton.setOnClickListener(v->{
                     tune.liveFrameMs=tune.liveFrameMs==48?60:tune.liveFrameMs==60?96:48;
@@ -554,9 +554,9 @@ public final class MainActivity extends Activity {
     }
     private void updateFifoTimingButton(){
         if(fifoTimingButton!=null){
-            String value=tune.liveFrameMs==48?t("快速 · 48 ms","Fast · 48 ms"):
-                tune.liveFrameMs==60?t("均衡 · 60 ms","Balanced · 60 ms"):t("较平顺 · 96 ms","Smoother · 96 ms");
-            fifoTimingButton.setText(t("实时帧长：","Live frame: ")+value);
+            String value=tune.liveFrameMs==48?t("低延迟 · RichTap 15ms 环 / FIFO 48ms","Low latency · RichTap 15ms ring / FIFO 48ms"):
+                tune.liveFrameMs==60?t("平衡 · RichTap 25ms 环 / FIFO 60ms","Balanced · RichTap 25ms ring / FIFO 60ms"):t("稳定 · RichTap 50ms 环 / FIFO 96ms","Stable · RichTap 50ms ring / FIFO 96ms");
+            fifoTimingButton.setText(t("延迟模式：","Latency mode: ")+value);
         }
     }
     private void refreshPresets(){
@@ -831,7 +831,7 @@ public final class MainActivity extends Activity {
             @Override public void onCaptureFrame(AudioAnalysis.Frame frame,int pulses){
                 if(spectrum!=null){spectrum.setPlaying(true);spectrum.pushSpectrum(frame.bars,frame.rms);}
                 if(inputStatus!=null)inputStatus.setText(t("音频信号：","Audio signal: ")+Math.round(frame.rms*100)+"%");
-                if(motorStatus!=null)motorStatus.setText((fifoPreferred?t("实际提交 FIFO 段数：","FIFO frames completed: "):t("兼容振动指令：","Compat haptic commands: "))+pulses+(fifoPreferred?"  ·  "+t("丢弃旧帧：","Dropped stale: ")+PlaybackCaptureService.nativeDropped+"  ·  "+t("原生耗时：","Native block: ")+PlaybackCaptureService.nativeProcessingMs+"ms":""));
+                if(motorStatus!=null)motorStatus.setText((fifoPreferred?t("实际提交 FIFO 段数：","FIFO frames completed: "):t("兼容振动指令：","Compat haptic commands: "))+pulses+(fifoPreferred?"  ·  "+t("丢弃旧帧：","Dropped stale: ")+PlaybackCaptureService.nativeDropped+"  ·  "+t("延迟估计：","Latency est: ")+PlaybackCaptureService.latencyText:""));
                 updateVolumeControls();
             }
             @Override public void onCaptureState(String status,boolean active){

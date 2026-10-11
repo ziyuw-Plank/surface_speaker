@@ -118,18 +118,21 @@ final class RootFifoTester {
         private volatile boolean readyOk;
         private volatile int frames,dropped;
         private volatile int nativeDurationMs;
+        volatile int ringMs=-1,hwMs=-1,lead=-1,leadUps;
         private volatile String writerError="";
         private int acknowledged;
         private final Thread writer;
         LiveSession(Process p,File f,File m,int samples){
             process=p;out=p.getOutputStream();temp=f;marker=m;
-            frameSamples=samples;staleMs=Math.max(75,(samples/24)*2);
+            frameSamples=samples;staleMs=samples==RICHTAP_FRAME?30:Math.max(75,(samples/24)*2);
             new Thread(()->{
                 try(BufferedReader reader=new BufferedReader(new InputStreamReader(p.getInputStream(),StandardCharsets.UTF_8))){
                     String line;
                     while((line=reader.readLine())!=null){
                         recentLog=line;synchronized(tail){tail.addLast(line);while(tail.size()>6)tail.removeFirst();}
                         if(line.startsWith("READY:")){readyOk=true;ready.countDown();}
+                        if(line.startsWith("LAT:")){String[] it=line.split(":");try{ringMs=Integer.parseInt(it[1]);hwMs=Integer.parseInt(it[2]);lead=Integer.parseInt(it[3]);}catch(Exception ignored){}}
+                        if(line.startsWith("LEADUP:")){try{lead=Integer.parseInt(line.substring(7).trim());leadUps++;}catch(Exception ignored){}}
                         if(line.startsWith("NEXT:")){
                             String[] items=line.split(":");
                             if(items.length>=3)try{nativeDurationMs=Integer.parseInt(items[2]);}catch(NumberFormatException ignored){}
@@ -188,11 +191,12 @@ final class RootFifoTester {
             marker.delete();temp.delete();busy.set(false);
         }
     }
-    static final int RICHTAP_FRAME=240; // 10 ms slots for the gapless /dev/qcom_haptic ring (v0.15 experimental)
+    static final int RICHTAP_FRAME=120; // 5 ms slots for the gapless /dev/qcom_haptic ring (v0.15 experimental)
     static LiveSession openLive(Context context,int frameSamples)throws Exception {return openLive(context,frameSamples,false,80);}
     static LiveSession openLive(Context context,int frameSamples,boolean richtap)throws Exception {return openLive(context,frameSamples,richtap,80);}
     /** richtapGain 0..128 scales the driver's RichTap Vmax; lead 10 x 10 ms slots covers the kernel's ~1572-sample refills. */
-    static LiveSession openLive(Context context,int frameSamples,boolean richtap,int richtapGain)throws Exception {
+    static LiveSession openLive(Context context,int frameSamples,boolean richtap,int richtapGain)throws Exception {return openLive(context,frameSamples,richtap,richtapGain,4);}
+    static LiveSession openLive(Context context,int frameSamples,boolean richtap,int richtapGain,int lead)throws Exception {
         if(richtap?frameSamples!=RICHTAP_FRAME:(frameSamples!=1152 && frameSamples!=1440 && frameSamples!=2304))throw new IllegalArgumentException("Unsupported frame samples");
         if(!deviceCandidate())throw new IllegalStateException("Native FIFO only enabled on shennong arm64");
         if(!busy.compareAndSet(false,true))throw new IllegalStateException("Another native FIFO test is active");
@@ -205,7 +209,7 @@ final class RootFifoTester {
             String workdir="/data/local/tmp/ssfifo-stream-"+Long.toHexString(System.nanoTime());
             String executable=workdir+"/fifo";
             String inner="mkdir -m 0700 "+quote(workdir)+" || exit 6; cp "+quote(source.getAbsolutePath())+" "+quote(executable)
-                +" && chmod 0700 "+quote(executable)+" && "+quote(executable)+(richtap?" rt2-live "+quote(marker.getAbsolutePath())+" 10 "+Math.max(16,Math.min(128,richtapGain))+" 1500":" live-stdin "+quote(marker.getAbsolutePath())+" "+frameSamples)
+                +" && chmod 0700 "+quote(executable)+" && "+quote(executable)+(richtap?" rt2-live "+quote(marker.getAbsolutePath())+" "+Math.max(2,Math.min(14,lead))+" "+Math.max(16,Math.min(128,richtapGain))+" 1500":" live-stdin "+quote(marker.getAbsolutePath())+" "+frameSamples)
                 +"; ret=$?; rm -f "+quote(executable)+"; rmdir "+quote(workdir)+"; exit $ret";
             Process proc=new ProcessBuilder("/system/bin/sh","-c","su -c "+quote(inner)).redirectErrorStream(true).start();
             LiveSession session=new LiveSession(proc,source,marker,frameSamples);
