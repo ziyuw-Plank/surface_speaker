@@ -94,6 +94,7 @@ public final class MainActivity extends Activity {
         engine=new HapticEngine(this);
         loadPrefs();
         buildUi();
+        new Thread(()->{String f0=RootFifoTester.loadDeviceF0();android.util.Log.i("SurfaceSpeaker",f0);},"f0-read").start();
         Shizuku.addRequestPermissionResultListener(shizukuPermissionListener);
         updateCapabilityButtons();
         PlaybackCaptureService.updateTune(tune);
@@ -156,7 +157,7 @@ public final class MainActivity extends Activity {
         LinearLayout top=row();top.setPadding(d(20),d(15),d(20),d(8));
         TextView brand=text("S / S",18,ACCENT,true);brand.setLetterSpacing(.18f);top.addView(brand);
         TextView heading=text("  SURFACE SPEAKER",17,TEXT,true);top.addView(heading);
-        TextView version=text("v0.14",11,BACK,true);version.setPadding(d(8),d(2),d(8),d(2));version.setBackground(background(ACCENT,10));LinearLayout.LayoutParams vp=lp(-2,-2);vp.leftMargin=d(10);top.addView(version,vp);
+        TextView version=text("v0.15.1",11,BACK,true);version.setPadding(d(8),d(2),d(8),d(2));version.setBackground(background(ACCENT,10));LinearLayout.LayoutParams vp=lp(-2,-2);vp.leftMargin=d(10);top.addView(version,vp);
         shell.addView(top,lp(-1,54));
         FrameLayout frame=new FrameLayout(this);shell.addView(frame,new LinearLayout.LayoutParams(-1,0,1));
         for(int i=0;i<4;i++){
@@ -271,7 +272,7 @@ public final class MainActivity extends Activity {
                 fifoBoostButton.setOnClickListener(v->{
                     if(tune.fifoBoost){tune.fifoBoost=false;preset=3;savePrefs();PlaybackCaptureService.updateTune(tune);updateVolumeControls();}
                     else new AlertDialog.Builder(this).setTitle(t("原生 FIFO 增强档（实验）","Native FIFO boost (experimental)"))
-                      .setMessage(t("仅将软件请求的 magnitude 上限从 48% 提升至 56%，不改变驱动电压限制。可能增加发热和机械负担，尚未在此手机校准。使用时请从低音量开始；有异常立即停止。","Raises requested FF magnitude cap from 48% to 56%. Does not override driver voltage limits. Thermal and mechanical effects are uncalibrated. Start at low volume and stop for abnormal heat or noise."))
+                      .setMessage(t("仅将软件请求的 magnitude 上限从 24% 提升至 30%（约 2.0V→2.5V），不改变驱动电压限制。可能增加发热和机械负担，尚未在此手机校准。使用时请从低音量开始；有异常立即停止。","Raises requested FF magnitude cap from 24% to 30% (~2.0V->2.5V). Does not override driver voltage limits. Thermal and mechanical effects are uncalibrated. Start at low volume and stop for abnormal heat or noise."))
                       .setNegativeButton(t("取消","Cancel"),null)
                       .setPositiveButton(t("我了解风险，开启","Enable boost"),(dd,which)->{tune.fifoBoost=true;preset=3;savePrefs();PlaybackCaptureService.updateTune(tune);updateVolumeControls();}).show();
                 });
@@ -308,6 +309,22 @@ public final class MainActivity extends Activity {
                 LinearLayout.LayoutParams fp=lp(-1,46);fp.topMargin=d(8);experimental.addView(fifoProbe,fp);
                 fifoProbe.setEnabled(RootFifoTester.deviceCandidate());fifoProbe.setAlpha(fifoProbe.isEnabled()?1f:.3f);
                 fifoProbe.setOnClickListener(v->runFifo(false,200));
+                Button rtTone=subtle(t("RichTap 测试音 (0.5s, 130Hz, 低音量)","RichTap test tone (0.5s, 130Hz, low)"));
+                LinearLayout.LayoutParams rtp=lp(-1,46);rtp.topMargin=d(8);experimental.addView(rtTone,rtp);
+                rtTone.setEnabled(RootFifoTester.deviceCandidate());rtTone.setAlpha(rtTone.isEnabled()?1f:.3f);
+                TextView rtLog=text(t("手机请平放桌面；结果显示在这里","Place phone flat; results appear here"),11,MUTED,false);
+                rtLog.setTypeface(Typeface.MONOSPACE);rtLog.setTextIsSelectable(true);rtLog.setPadding(d(10),d(10),d(10),d(10));rtLog.setBackground(background(0xff0b0f0a,12));
+                ScrollView rtScroll=new ScrollView(this);rtScroll.addView(rtLog);rtScroll.setNestedScrollingEnabled(true);
+                LinearLayout.LayoutParams rsp=lp(-1,260);rsp.topMargin=d(8);experimental.addView(rtScroll,rsp);
+                Button rtCopy=subtle(t("复制测试日志","Copy test log"));LinearLayout.LayoutParams rcp=lp(-1,42);rcp.topMargin=d(6);experimental.addView(rtCopy,rcp);
+                rtCopy.setOnClickListener(v->{ClipboardManager cm=(ClipboardManager)getSystemService(CLIPBOARD_SERVICE);if(cm!=null)cm.setPrimaryClip(ClipData.newPlainText("richtap test",rtLog.getText()));notifyStatus(t("已复制","Copied"));});
+                rtTone.setOnClickListener(v->{
+                    if(PlaybackCaptureService.running||nativePreviewBusy||(player!=null&&player.isPlaying())){notifyStatus(t("请先停止播放/捕获","Stop playback/capture first"));return;}
+                    long now=android.os.SystemClock.uptimeMillis();if(now-lastNativeTestMs<3000){notifyStatus(t("冷却中","Cooldown"));return;}lastNativeTestMs=now;
+                    rtTone.setEnabled(false);rtLog.setText(t("运行中…","Running…"));
+                    new Thread(()->{String out=RootFifoTester.loadDeviceF0()+"\n"+RootFifoTester.richtapTone(getApplicationContext());
+                        ui.post(()->{rtLog.setText(out);rtTone.setEnabled(true);});},"richtap-tone").start();
+                });
                 LinearLayout tones=row();LinearLayout.LayoutParams tp=lp(-1,47);tp.topMargin=d(8);experimental.addView(tones,tp);
                 for(int hz:new int[]{120,200,300}){
                     Button tone=subtle(hz+" Hz");LinearLayout.LayoutParams bp=new LinearLayout.LayoutParams(0,d(46),1);
@@ -380,7 +397,7 @@ public final class MainActivity extends Activity {
             volumeFollowButton.setBackground(background(tune.followVolume?0xff357c62:0xff353c30,14));
         }
         if(fifoBoostButton!=null){
-            fifoBoostButton.setText(t("FIFO 输出：","FIFO output: ")+(tune.fifoBoost?t("增强档 · 56% 上限","Boost · 56% ceiling"):t("标准档 · 48% 上限","Standard · 48% ceiling")));
+            fifoBoostButton.setText(t("FIFO 输出：","FIFO output: ")+(tune.fifoBoost?t("增强档 · 30% 上限 ≈2.5V","Boost · 30% ≈2.5V"):t("标准档 · 24% 上限 ≈2.0V","Standard · 24% ≈2.0V")));
             fifoBoostButton.setBackground(background(tune.fifoBoost?0xff846632:0xff353c30,14));
         }
         if(volumeLinkStatus!=null && engine!=null){
@@ -415,7 +432,7 @@ public final class MainActivity extends Activity {
     }
     private int nativeStrength(){
         float level=engine.effectiveOutputScale(tune);
-        int cap=tune.fifoBoost?56:48; // FF magnitude request, not measured motor power
+        int cap=tune.fifoBoost?30:24; // x custom_vmax 8300 mV -> ~2.5 / ~2.0 V target (was 48-56% ~4-5 V, rattle)
         return level<=0f?0:Math.max(1,Math.min(cap,Math.round(cap*(float)Math.sqrt(level))));
     }
     private void runLongTone(){

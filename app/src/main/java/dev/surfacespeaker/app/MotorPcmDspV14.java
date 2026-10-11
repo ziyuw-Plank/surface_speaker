@@ -30,7 +30,19 @@ final class MotorPcmDspV14 {
     private float env, pkEnv, compGain=1f, lastOut, rmsSq=0.0004f, normalizer=1f, gateGain;
     private int lastDetail=-1, seed=0x1234ab8f;
 
-    MotorPcmDspV14(){setTuning(52,60);}
+    /** Device LRA f0 (Hz). Default 127.7 Hz (shennong lra_frequency_hz=1277); updated by loadDeviceF0(). */
+    static volatile float deviceF0=127.7f;
+    MotorPcmDspV14(){setTuning(52,60);setResonance(deviceF0);}
+    /** Parse /sys/class/qcom-haptics/lra_frequency_hz ("1277" = 127.7 Hz). Read-only. Returns clamped Hz or -1. */
+    static float parseF0(String raw){
+        if(raw==null)return -1;
+        java.util.regex.Matcher m=java.util.regex.Pattern.compile("(\\d+(?:\\.\\d+)?)").matcher(raw);
+        if(!m.find())return -1;
+        float v=Float.parseFloat(m.group(1));
+        if(v>1000)v/=10f;
+        if(v<50||v>400)return -1;
+        return Math.max(120f,Math.min(140f,v));
+    }
 
     /** Same controls as v0.13: bassClean 0..100 -> HP 60..140 Hz, trebleStable 0..100 -> LP 1400..600 Hz. */
     void setTuning(int bassClean,int trebleStable){

@@ -146,7 +146,8 @@ public final class PlaybackCaptureService extends Service {
                         HapticEngine.Tune nowTune=settings;
                         float level=motor.effectiveOutputScale(nowTune);
                         // Square-root law keeps dynamics audible at normal system volume.
-                        int ceiling=nowTune.fifoBoost?56:48;
+                        // 8300 mV custom_vmax * ceiling% -> ~2.0 V (24) / ~2.5 V (30); v13 48-56% gave ~4-5 V and rattle.
+                        int ceiling=liveSession!=null&&activeFrameMs==10?56:(nowTune.fifoBoost?30:24);
                         int strength=level<=0f?0:Math.max(1,Math.min(ceiling,Math.round(ceiling*(float)Math.sqrt(level))));
                         int peak=0;for(byte sample:frameData)peak=Math.max(peak,Math.abs((int)sample));
                         if(peak<3)strength=0;

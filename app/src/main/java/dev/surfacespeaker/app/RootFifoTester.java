@@ -52,6 +52,42 @@ final class RootFifoTester {
         }catch(Exception e){return "ERROR:decode/preview "+e.getClass().getSimpleName()+": "+e.getMessage();}
         finally{if(clip!=null)clip.file.delete();busy.set(false);}
     }
+    static final String F0_PATH="/sys/class/qcom-haptics/lra_frequency_hz";
+    /** Read LRA f0 (read-only): direct read first, then `su cat`. Updates MotorPcmDspV14.deviceF0. */
+    static String loadDeviceF0(){
+        String raw=null;
+        try(BufferedReader r=new BufferedReader(new java.io.FileReader(F0_PATH))){raw=r.readLine();}catch(Exception ignored){}
+        if(MotorPcmDspV14.parseF0(raw)<0){
+            try{Process p=new ProcessBuilder("su","-c","cat "+F0_PATH).redirectErrorStream(true).start();
+                if(p.waitFor(3,TimeUnit.SECONDS))raw=new String(p.getInputStream().readNBytes(64),StandardCharsets.UTF_8).trim();else p.destroyForcibly();
+            }catch(Exception ignored){}
+        }
+        float f=MotorPcmDspV14.parseF0(raw);
+        if(f>0)MotorPcmDspV14.deviceF0=f;
+        return "LRA f0: raw="+raw+" -> "+MotorPcmDspV14.deviceF0+" Hz"+(f>0?"":" (fallback)");
+    }
+    /** Copy the bundled helper to app files dir so the user can run it manually via su. */
+    static String persistHelper(Context context){
+        File dst=new File(context.getFilesDir(),"native_fifo_arm64");
+        try(InputStream in=context.getAssets().open("native_fifo_arm64");FileOutputStream out=new FileOutputStream(dst)){
+            byte[] b=new byte[8192];int n;while((n=in.read(b))>0)out.write(b,0,n);
+        }catch(Exception e){return "ERROR: extract "+e.getMessage();}
+        dst.setExecutable(true,true);
+        return dst.getAbsolutePath();
+    }
+    /** Safe RichTap ring test: 0.5 s, 130 Hz, gain 24/128 (fixed inside helper), then filtered dmesg. */
+    static String richtapTone(Context context){
+        if(!deviceCandidate())return "DISABLED: Xiaomi shennong arm64 only";
+        String path=persistHelper(context);
+        StringBuilder sb=new StringBuilder();
+        sb.append("Helper copy: ").append(path).append("\nManual: su -c 'cp ").append(path).append(" /data/local/tmp/nf && chmod 700 /data/local/tmp/nf && /data/local/tmp/nf rt2-tone 130'\n\n");
+        sb.append("== rt2-tone 130 ==\n").append(execute(context,"rt2-tone 130",null)).append("\n");
+        try{Process p=new ProcessBuilder("su","-c","dmesg | grep -iE 'richtap|fifo|haptic' | tail -30").redirectErrorStream(true).start();
+            if(!p.waitFor(5,TimeUnit.SECONDS))p.destroyForcibly();
+            sb.append("== dmesg (richtap|fifo|haptic, last 30) ==\n").append(new String(p.getInputStream().readNBytes(16384),StandardCharsets.UTF_8));
+        }catch(Exception e){sb.append("dmesg error: ").append(e.getMessage());}
+        return sb.toString();
+    }
     private static String execute(Context context,String args,File pcm){
         if(!busy.compareAndSet(false,true))return "ERROR: native test already running";
         try{return runPrivileged(context,args,0,pcm);}
@@ -165,7 +201,7 @@ final class RootFifoTester {
             String workdir="/data/local/tmp/ssfifo-stream-"+Long.toHexString(System.nanoTime());
             String executable=workdir+"/fifo";
             String inner="mkdir -m 0700 "+quote(workdir)+" || exit 6; cp "+quote(source.getAbsolutePath())+" "+quote(executable)
-                +" && chmod 0700 "+quote(executable)+" && "+quote(executable)+(richtap?" rt2-live "+quote(marker.getAbsolutePath())+" 3 64 1500":" live-stdin "+quote(marker.getAbsolutePath())+" "+frameSamples)
+                +" && chmod 0700 "+quote(executable)+" && "+quote(executable)+(richtap?" rt2-live "+quote(marker.getAbsolutePath())+" 3 40 1500":" live-stdin "+quote(marker.getAbsolutePath())+" "+frameSamples)
                 +"; ret=$?; rm -f "+quote(executable)+"; rmdir "+quote(workdir)+"; exit $ret";
             Process proc=new ProcessBuilder("/system/bin/sh","-c","su -c "+quote(inner)).redirectErrorStream(true).start();
             LiveSession session=new LiveSession(proc,source,marker,frameSamples);
