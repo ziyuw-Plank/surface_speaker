@@ -112,6 +112,8 @@ final class RootFifoTester {
         private final File temp;
         private final File marker;
         private volatile String recentLog="";
+        private final java.util.ArrayDeque<String> tail=new java.util.ArrayDeque<>();
+        String tailLog(){synchronized(tail){return String.join(" | ",tail);}}
         private final CountDownLatch ready=new CountDownLatch(1);
         private volatile boolean readyOk;
         private volatile int frames,dropped;
@@ -126,7 +128,7 @@ final class RootFifoTester {
                 try(BufferedReader reader=new BufferedReader(new InputStreamReader(p.getInputStream(),StandardCharsets.UTF_8))){
                     String line;
                     while((line=reader.readLine())!=null){
-                        recentLog=line;
+                        recentLog=line;synchronized(tail){tail.addLast(line);while(tail.size()>6)tail.removeFirst();}
                         if(line.startsWith("READY:")){readyOk=true;ready.countDown();}
                         if(line.startsWith("NEXT:")){
                             String[] items=line.split(":");
@@ -173,7 +175,7 @@ final class RootFifoTester {
         int frames(){return frames;}
         int dropped(){return dropped;}
         int nativeDurationMs(){return nativeDurationMs;}
-        String recentLog(){return writerError.isEmpty()?recentLog:writerError;}
+        String recentLog(){return (writerError.isEmpty()?"":writerError+" | ")+tailLog();}
         boolean alive(){return !closed.get()&&process.isAlive()&&writerError.isEmpty()&&writer.isAlive();}
         @Override public void close(){
             if(!closed.compareAndSet(false,true))return;
@@ -187,8 +189,10 @@ final class RootFifoTester {
         }
     }
     static final int RICHTAP_FRAME=240; // 10 ms slots for the gapless /dev/qcom_haptic ring (v0.15 experimental)
-    static LiveSession openLive(Context context,int frameSamples)throws Exception {return openLive(context,frameSamples,false);}
-    static LiveSession openLive(Context context,int frameSamples,boolean richtap)throws Exception {
+    static LiveSession openLive(Context context,int frameSamples)throws Exception {return openLive(context,frameSamples,false,80);}
+    static LiveSession openLive(Context context,int frameSamples,boolean richtap)throws Exception {return openLive(context,frameSamples,richtap,80);}
+    /** richtapGain 0..128 scales the driver's RichTap Vmax; lead 10 x 10 ms slots covers the kernel's ~1572-sample refills. */
+    static LiveSession openLive(Context context,int frameSamples,boolean richtap,int richtapGain)throws Exception {
         if(richtap?frameSamples!=RICHTAP_FRAME:(frameSamples!=1152 && frameSamples!=1440 && frameSamples!=2304))throw new IllegalArgumentException("Unsupported frame samples");
         if(!deviceCandidate())throw new IllegalStateException("Native FIFO only enabled on shennong arm64");
         if(!busy.compareAndSet(false,true))throw new IllegalStateException("Another native FIFO test is active");
@@ -201,11 +205,11 @@ final class RootFifoTester {
             String workdir="/data/local/tmp/ssfifo-stream-"+Long.toHexString(System.nanoTime());
             String executable=workdir+"/fifo";
             String inner="mkdir -m 0700 "+quote(workdir)+" || exit 6; cp "+quote(source.getAbsolutePath())+" "+quote(executable)
-                +" && chmod 0700 "+quote(executable)+" && "+quote(executable)+(richtap?" rt2-live "+quote(marker.getAbsolutePath())+" 3 40 1500":" live-stdin "+quote(marker.getAbsolutePath())+" "+frameSamples)
+                +" && chmod 0700 "+quote(executable)+" && "+quote(executable)+(richtap?" rt2-live "+quote(marker.getAbsolutePath())+" 10 "+Math.max(16,Math.min(128,richtapGain))+" 1500":" live-stdin "+quote(marker.getAbsolutePath())+" "+frameSamples)
                 +"; ret=$?; rm -f "+quote(executable)+"; rmdir "+quote(workdir)+"; exit $ret";
             Process proc=new ProcessBuilder("/system/bin/sh","-c","su -c "+quote(inner)).redirectErrorStream(true).start();
             LiveSession session=new LiveSession(proc,source,marker,frameSamples);
-            if(!session.awaitReady()) {String log=session.recentLog();session.close();throw new IllegalStateException("Root FIFO could not start: "+log);}
+            if(!session.awaitReady()) {String log=session.tailLog();session.close();throw new IllegalStateException("Root FIFO could not start: "+log);}
             return session;
         }catch(Exception e){source.delete();marker.delete();busy.set(false);throw e;}
     }

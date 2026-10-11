@@ -32,6 +32,7 @@ public final class PlaybackCaptureService extends Service {
     static volatile boolean running;
     static volatile boolean preferNativeFifo;
     static volatile String routeMessage="Idle";
+    static volatile boolean richtapActive;
     static volatile int nativeBlocks;
     static volatile int nativeDropped;
     static volatile int nativeProcessingMs;
@@ -113,12 +114,13 @@ public final class PlaybackCaptureService extends Service {
             try{
                 // v0.15: try the gapless RichTap ring first (10 ms slots); fall back to FF_CUSTOM segments.
                 try{
-                    liveSession=RootFifoTester.openLive(this,RootFifoTester.RICHTAP_FRAME,true);
-                    frameSamples=RootFifoTester.RICHTAP_FRAME;activeFrameMs=10;
-                    routeMessage="RichTap gapless stream (10ms slots, experimental)";
+                    liveSession=RootFifoTester.openLive(this,RootFifoTester.RICHTAP_FRAME,true,settings.fifoBoost?104:80);
+                    frameSamples=RootFifoTester.RICHTAP_FRAME;activeFrameMs=10;richtapActive=true;
+                    routeMessage="RichTap gapless stream · 10ms slots · ring lead 100ms · gain "+(settings.fifoBoost?104:80)+"/128";
                 }catch(Exception rt){
+                    richtapActive=false;
                     liveSession=RootFifoTester.openLive(this,frameSamples,false);
-                    routeMessage="Native FIFO "+frameMs+"ms chunks (RichTap unavailable: "+rt.getMessage()+")";
+                    routeMessage="Native FIFO "+frameMs+"ms segments (RichTap failed: "+rt.getMessage()+")";
                 }
                 converter=new LivePcmConverter(frameSamples);
                 motor.setEnabled(false);
@@ -129,7 +131,7 @@ public final class PlaybackCaptureService extends Service {
             }
         }else{routeMessage="Android Haptics compatibility";}
 
-        final LivePcmConverter finalConverter=converter;
+        final LivePcmConverter[] conv={converter};
         int silent=0;
         while(active.get()){
             int count;
@@ -139,15 +141,16 @@ public final class PlaybackCaptureService extends Service {
 
             if(nativeMode){
                 try{
-                    finalConverter.setTune(settings.gain,settings.detail,settings.bassClean,settings.trebleStable);
-                    finalConverter.consume(pcm,count,sampleRate,frameData->{
+                    conv[0].setTune(settings.gain,settings.detail,settings.bassClean,settings.trebleStable);
+                    conv[0].consume(pcm,count,sampleRate,frameData->{
                         RootFifoTester.LiveSession session=liveSession;
-                        if(session==null)throw new IllegalStateException("Native root stream stopped");
+                        if(session==null){if(!active.get())return;throw new IllegalStateException("Native session closed unexpectedly");}
                         HapticEngine.Tune nowTune=settings;
                         float level=motor.effectiveOutputScale(nowTune);
                         // Square-root law keeps dynamics audible at normal system volume.
                         // 8300 mV custom_vmax * ceiling% -> ~2.0 V (24) / ~2.5 V (30); v13 48-56% gave ~4-5 V and rattle.
-                        int ceiling=liveSession!=null&&activeFrameMs==10?56:(nowTune.fifoBoost?30:24);
+                        // RichTap: Vmax set by helper gain; FIFO: 42% x 8300 mV ~3.5 V default, 56% boost (old max). DSP handles rattle.
+                        int ceiling=richtapActive?56:(nowTune.fifoBoost?56:42);
                         int strength=level<=0f?0:Math.max(1,Math.min(ceiling,Math.round(ceiling*(float)Math.sqrt(level))));
                         int peak=0;for(byte sample:frameData)peak=Math.max(peak,Math.abs((int)sample));
                         if(peak<3)strength=0;
@@ -155,7 +158,21 @@ public final class PlaybackCaptureService extends Service {
                         nativeBlocks=session.frames();nativeDropped=session.dropped();nativeProcessingMs=session.nativeDurationMs();
                         if(!session.alive())throw new IllegalStateException(session.recentLog());
                     });
-                }catch(Exception e){routeMessage="Native FIFO streaming error: "+e.getMessage();stopError=routeMessage;break;}
+                }catch(Exception e){
+                    if(!active.get())break;
+                    if(richtapActive){
+                        // Mid-stream fallback: RichTap failed -> segmented FF_CUSTOM FIFO, keep capturing.
+                        String why=e.getMessage();
+                        try{RootFifoTester.LiveSession old=liveSession;liveSession=null;if(old!=null)old.close();}catch(Exception ignored){}
+                        try{
+                            int fs=frameMs*24;liveSession=RootFifoTester.openLive(this,fs,false);
+                            conv[0]=new LivePcmConverter(fs);activeFrameMs=frameMs;richtapActive=false;
+                            routeMessage="Native FIFO "+frameMs+"ms segments (RichTap stopped: "+why+")";state(routeMessage,true);
+                            continue;
+                        }catch(Exception f){e=f;}
+                    }
+                    routeMessage=(richtapActive?"RichTap":"Native FIFO")+" error: "+e.getMessage();stopError=routeMessage;break;
+                }
             }else motor.onPcm(pcm,count,sampleRate,settings);
             long now=android.os.SystemClock.uptimeMillis();
             if(now-lastUi>85){

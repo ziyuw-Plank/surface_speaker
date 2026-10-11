@@ -157,7 +157,7 @@ public final class MainActivity extends Activity {
         LinearLayout top=row();top.setPadding(d(20),d(15),d(20),d(8));
         TextView brand=text("S / S",18,ACCENT,true);brand.setLetterSpacing(.18f);top.addView(brand);
         TextView heading=text("  SURFACE SPEAKER",17,TEXT,true);top.addView(heading);
-        TextView version=text("v0.15.1",11,BACK,true);version.setPadding(d(8),d(2),d(8),d(2));version.setBackground(background(ACCENT,10));LinearLayout.LayoutParams vp=lp(-2,-2);vp.leftMargin=d(10);top.addView(version,vp);
+        TextView version=text("v0.15.2",11,BACK,true);version.setPadding(d(8),d(2),d(8),d(2));version.setBackground(background(ACCENT,10));LinearLayout.LayoutParams vp=lp(-2,-2);vp.leftMargin=d(10);top.addView(version,vp);
         shell.addView(top,lp(-1,54));
         FrameLayout frame=new FrameLayout(this);shell.addView(frame,new LinearLayout.LayoutParams(-1,0,1));
         for(int i=0;i<4;i++){
@@ -168,12 +168,12 @@ public final class MainActivity extends Activity {
             sections[i]=scroller;
             if(i==0){
                 TextView intro=text(t("把声音变成触觉","Feel the sound"),24,TEXT,true);page.addView(intro);
-                TextView tag=text(t("v0.14 骨传导质感：虚拟低音 · 共振抑制 · 中频清晰","v0.14 bone-conduction feel: virtual bass · resonance control · clear mids"),12,MUTED,false);tag.setPadding(0,d(2),0,d(10));page.addView(tag);
+                TextView tag=text(t("v0.15 骨传导质感 · RichTap 无缝流 · 共振 127.7Hz 抑制","v0.15 bone-conduction feel · gapless RichTap · 127.7Hz resonance control"),12,MUTED,false);tag.setPadding(0,d(2),0,d(10));page.addView(tag);
                 spectrum=new SpectrumView(this);page.addView(spectrum,lp(-1,270));
                 statusLabel=text(t("等待音频信号","Waiting for audio"),12,ACCENT,false);
                 statusLabel.setGravity(Gravity.CENTER);page.addView(statusLabel);
                 LinearLayout live=card(page);
-                header(live,t("实时音乐 · FIFO 优先","LIVE AUDIO · FIFO FIRST"),t("小米设备默认使用分段原生 FIFO，约 60 ms 分段；系统仍需要音频捕获授权，不读取画面。","Xiaomi defaults to Native FIFO (60ms segments). Android audio-only capture consent is still required."));
+                header(live,t("实时音乐 · v0.15 RichTap 优先","LIVE AUDIO · v0.15 RICHTAP FIRST"),t("优先使用 RichTap 无缝流（10ms 槽，环形缓冲约 100ms）；失败自动回退分段 FIFO。需 Root 与音频捕获授权，不读取画面。","Gapless RichTap stream first (10ms slots, ~100ms ring); auto-fallback to segmented FIFO. Needs root + audio-only capture consent."));
                 captureButton=button(t("开始实时捕获","Start live capture"));live.addView(captureButton,lp(-1,52));
                 captureButton.setOnClickListener(v->{if(PlaybackCaptureService.running)stopCapture();else if(!requestingCapture)startCapture();});
                 captureStatus=text(t("未激活","Inactive"),13,MUTED,false);
@@ -272,7 +272,7 @@ public final class MainActivity extends Activity {
                 fifoBoostButton.setOnClickListener(v->{
                     if(tune.fifoBoost){tune.fifoBoost=false;preset=3;savePrefs();PlaybackCaptureService.updateTune(tune);updateVolumeControls();}
                     else new AlertDialog.Builder(this).setTitle(t("原生 FIFO 增强档（实验）","Native FIFO boost (experimental)"))
-                      .setMessage(t("仅将软件请求的 magnitude 上限从 24% 提升至 30%（约 2.0V→2.5V），不改变驱动电压限制。可能增加发热和机械负担，尚未在此手机校准。使用时请从低音量开始；有异常立即停止。","Raises requested FF magnitude cap from 24% to 30% (~2.0V->2.5V). Does not override driver voltage limits. Thermal and mechanical effects are uncalibrated. Start at low volume and stop for abnormal heat or noise."))
+                      .setMessage(t("仅将软件请求的 magnitude 上限从 42% 提升至 56%，RichTap 增益 80→104，不改变驱动电压限制。可能增加发热和机械负担，尚未在此手机校准。使用时请从低音量开始；有异常立即停止。","Raises requested FF magnitude cap from 42% to 56%, RichTap gain 80->104. Does not override driver voltage limits. Thermal and mechanical effects are uncalibrated. Start at low volume and stop for abnormal heat or noise."))
                       .setNegativeButton(t("取消","Cancel"),null)
                       .setPositiveButton(t("我了解风险，开启","Enable boost"),(dd,which)->{tune.fifoBoost=true;preset=3;savePrefs();PlaybackCaptureService.updateTune(tune);updateVolumeControls();}).show();
                 });
@@ -397,7 +397,7 @@ public final class MainActivity extends Activity {
             volumeFollowButton.setBackground(background(tune.followVolume?0xff357c62:0xff353c30,14));
         }
         if(fifoBoostButton!=null){
-            fifoBoostButton.setText(t("FIFO 输出：","FIFO output: ")+(tune.fifoBoost?t("增强档 · 30% 上限 ≈2.5V","Boost · 30% ≈2.5V"):t("标准档 · 24% 上限 ≈2.0V","Standard · 24% ≈2.0V")));
+            fifoBoostButton.setText(t("FIFO 输出：","FIFO output: ")+(tune.fifoBoost?t("增强档 · FIFO 56% / RichTap 104","Boost · FIFO 56% / RichTap 104"):t("标准档 · FIFO 42% ≈3.5V / RichTap 80","Standard · FIFO 42% ≈3.5V / RichTap 80")));
             fifoBoostButton.setBackground(background(tune.fifoBoost?0xff846632:0xff353c30,14));
         }
         if(volumeLinkStatus!=null && engine!=null){
@@ -432,7 +432,7 @@ public final class MainActivity extends Activity {
     }
     private int nativeStrength(){
         float level=engine.effectiveOutputScale(tune);
-        int cap=tune.fifoBoost?30:24; // x custom_vmax 8300 mV -> ~2.5 / ~2.0 V target (was 48-56% ~4-5 V, rattle)
+        int cap=tune.fifoBoost?56:42; // x custom_vmax 8300 mV -> ~3.5 V default, 56% = old max
         return level<=0f?0:Math.max(1,Math.min(cap,Math.round(cap*(float)Math.sqrt(level))));
     }
     private void runLongTone(){
@@ -508,7 +508,7 @@ public final class MainActivity extends Activity {
             captureButton.setAlpha(requestingCapture && !live?0.72f:1f);
         }
         if(captureStatus!=null){
-            captureStatus.setText(live?(fifoPreferred?t("● FIFO 捕获 · ","● FIFO capturing · ")+PlaybackCaptureService.activeFrameMs+"ms":t("● Android 兼容捕获","● Android compatibility capture"))
+            captureStatus.setText(live?(fifoPreferred?"● "+PlaybackCaptureService.routeMessage:t("● Android 兼容捕获","● Android compatibility capture"))
                 :requestingCapture?t("等待音频权限与系统同意","Waiting for system consent")
                 :t("实时捕获未激活","Live capture inactive"));
             captureStatus.setTextColor(live?ACCENT:MUTED);

@@ -29,7 +29,7 @@
  *     (oldest-first is impossible once VALID; we drop new input instead and count it).
  *
  * Input on stdin: raw signed 8-bit PCM @ 24 kHz, any chunking (already DSP'd + capped).
- * usage: richtap2 live <stop-marker> [lead_slots=3] [gain0_128=64] [idle_ms=1500]
+ * usage: richtap2 live <stop-marker> [lead_slots=10] [gain0_128=80] [idle_ms=1500]
  *   (embedded in native_fifo_arm64 as: fifo rt2-live|rt2-tone|rt2-f0 ...)
  *   LRA f0 on this phone: ro.odm.mm.vibrator resonant_frequency=130 Hz
  *        richtap2 tone <hz> (0.5 s, gain 24) | richtap2 f0
@@ -99,7 +99,13 @@ static int open_ring(void){
     return 0;
 }
 static void stop_stream(void){
-    if(streaming){ioctl(fd,IOC_STOP,0);streaming=0;}
+    if(streaming){
+        /* Terminal slot: kernel sees FINISHED instead of reading an empty slot ("invalid data"). */
+        unsigned char *s=slot(cursor);
+        if(st(cursor)!=S_VALID){int16_t z=0;memcpy(s+2,&z,2);__atomic_store_n(s,0xAAu,__ATOMIC_RELEASE);}
+        uint64_t t=now_us();while(pending()&&now_us()-t<200000)sleep_us(2000);
+        ioctl(fd,IOC_STOP,0);streaming=0;
+    }
 }
 static int start_stream(void){
     stop_stream();
@@ -135,8 +141,10 @@ static int read_full(unsigned char *p,size_t n){
 }
 static int live(unsigned lead,unsigned gain,unsigned idle_ms){
     unsigned char in[1+RT2_FRAME];int8_t buf[RT2_FRAME],zero[RT2_FRAME]={0};
-    uint64_t last_audio=0,next_due=0;unsigned long long frames=0,shown=0;
+    uint64_t last_audio=0,next_due=0,full_since=0;unsigned long long frames=0,shown=0;
     if(gain>128){gain=128;}
+    if(lead<4)lead=4;
+    if(lead>14)lead=14;
     rt_priority();setvbuf(stdout,NULL,_IOLBF,0);
     if(ioctl(fd,IOC_GAIN,(unsigned long)gain)<0)fprintf(stderr,"WARN: SETTING_GAIN %s\n",strerror(errno));
     puts("READY: richtap2 gapless ring, 10ms slots");
@@ -157,10 +165,13 @@ static int live(unsigned lead,unsigned gain,unsigned idle_ms){
                 if(rc<0){fprintf(stderr,"WARN: kernel stalled, restart\n");if(start_stream()){puts("ERROR: restart failed");return 4;}}
                 next_due=t+10000;
             }
-            frames++;printf("NEXT:%llu:%llu\n",frames,(unsigned long long)(now_us()-t0));
+            frames++;printf("NEXT:%llu:%llu\n",frames,(unsigned long long)((now_us()-t0)/1000));
         }
-        if(!streaming)continue;
+        if(!streaming){full_since=0;continue;}
         uint64_t t=now_us();
+        /* Kernel refills ~1572 samples (~65 ms) per FIFO-empty IRQ; if the ring stays full for 400 ms it is not consuming. */
+        if(pending()>=lead){if(!full_since)full_since=t;else if(t-full_since>400000){puts("ERROR: kernel not consuming RichTap ring (stalled >400ms)");fprintf(stderr,"ERROR: ring stalled\n");stop_stream();return 9;}}
+        else full_since=0;
         if(t>next_due+10000&&pending()<2){put_slot(zero,RT2_FRAME,lead);keepalive++;next_due=t;}
         if(t-last_audio>(uint64_t)idle_ms*1000)stop_stream();
         if(sent>=shown+1000){shown=sent;fprintf(stderr,"STATUS: rt2 sent=%llu drop=%llu keep=%llu restart=%llu pend=%u\n",sent,dropped,keepalive,restarts,pending());}
@@ -192,7 +203,7 @@ int main(int argc,char **argv){
     if(!strcmp(argv[1],"f0")){uint32_t f=0;rc=ioctl(fd,IOC_F0,&f);printf("F0 rc=%d value=%u (Hz, driver units unverified)\n",rc,f);rc=0;}
     else if(!strcmp(argv[1],"tone")&&argc>2)rc=tone(atoi(argv[2]));
     else if(!strcmp(argv[1],"live")&&argc>2){marker=argv[2];
-        rc=live(argc>3?(unsigned)atoi(argv[3]):3,argc>4?(unsigned)atoi(argv[4]):64,argc>5?(unsigned)atoi(argv[5]):1500);}
+        rc=live(argc>3?(unsigned)atoi(argv[3]):10,argc>4?(unsigned)atoi(argv[4]):80,argc>5?(unsigned)atoi(argv[5]):1500);}
     if(ring){munmap(ring,MMAP_SIZE);}
     if(fd>=0){close(fd);}
     return rc;
