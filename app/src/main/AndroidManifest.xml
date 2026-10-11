@@ -7,14 +7,13 @@
     <queries>
         <package android:name="moe.shizuku.privileged.api" />
     </queries>
-    <application android:label="SurfaceSpeaker" android:theme="@android:style/Theme.Material.NoActionBar" android:usesCleartextTraffic="false" android:allowBackup="false">
-        <activity android:name=".SplashActivity" android:exported="true">
+    <application android:label="SurfaceSpeaker" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round" android:theme="@android:style/Theme.Material.NoActionBar" android:usesCleartextTraffic="false" android:allowBackup="false">
+        <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <activity android:name=".MainActivity" android:exported="false" />
         <service android:name=".PlaybackCaptureService" android:exported="false" android:foregroundServiceType="mediaProjection" />
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
